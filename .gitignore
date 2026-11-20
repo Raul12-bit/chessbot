@@ -1,0 +1,11 @@
+/target
+/target-*
+/bins/
+/tests/books/*.epd
+/tests/books/*.pgn
+/data/
+deploy/config.yml
+deploy/lichess-bot/
+*.log
+NIGHT_UNTIL
+DONE

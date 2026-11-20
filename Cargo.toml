@@ -1,0 +1,20 @@
+[package]
+name = "chessbot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[features]
+# Phase-3 baseline without TT and move ordering (for the phase-3 acceptance test only)
+weak = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[profile.test]
+opt-level = 3
