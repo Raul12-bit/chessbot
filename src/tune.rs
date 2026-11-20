@@ -155,6 +155,10 @@ pub fn run(data_path: &str, out: &str, epochs: usize, limit: usize, threads: usi
         return;
     }
     let mut w: Vec<[f64; 2]> = P.iter().map(|&(a, b)| [a as f64, b as f64]).collect();
+    // L2 regularization towards the starting values: keeps rarely seen features
+    // (e.g. queen mobility 25+) from drifting to extreme values.
+    let w0 = w.clone();
+    let lambda: f64 = std::env::var("TUNE_L2").ok().and_then(|v| v.parse().ok()).unwrap_or(5e-10);
 
     // fit K for the initial parameters (golden-section search)
     let (mut lo, mut hi) = (0.3f64, 3.0f64);
@@ -176,7 +180,12 @@ pub fn run(data_path: &str, out: &str, epochs: usize, limit: usize, threads: usi
     let mut v = vec![[0.0f64; 2]; N_PARAMS];
     for epoch in 1..=epochs {
         let lr = if epoch < epochs / 2 { 1.0 } else { 0.4 };
-        let g = gradient(&d, &w, k, threads);
+        let mut g = gradient(&d, &w, k, threads);
+        for i in 0..N_PARAMS {
+            for j in 0..2 {
+                g[i][j] += 2.0 * lambda * (w[i][j] - w0[i][j]);
+            }
+        }
         for i in 0..N_PARAMS {
             for j in 0..2 {
                 m[i][j] = b1 * m[i][j] + (1.0 - b1) * g[i][j];
