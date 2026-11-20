@@ -9,3 +9,5 @@ deploy/lichess-bot/
 *.log
 NIGHT_UNTIL
 DONE
+/logs/
+config.json
