@@ -21,7 +21,7 @@ const USE_ORDERING: bool = !cfg!(feature = "weak");
 // Phase-4 search features. Each one is switched on only after passing its own SPRT test.
 const F_PVS: bool = true;
 const F_NMP: bool = true;
-const F_LMR: bool = false;
+const F_LMR: bool = true;
 const F_RFP: bool = false;
 const F_FP: bool = false;
 const F_LMP: bool = false;
@@ -29,6 +29,9 @@ const F_CHECK_EXT: bool = false;
 const F_QS_SEE: bool = false;
 const F_IIR: bool = false;
 const F_CONT: bool = false;
+// Extra features beyond the phase-4 list (also SPRT-gated).
+const F_QS_TT: bool = false;
+const F_SEE_PRUNE: bool = false;
 
 #[derive(Clone, Copy, Default)]
 struct StackEntry {
@@ -514,7 +517,7 @@ impl Searcher {
             if let Some(e) = self.tt.probe(b.hash) {
                 tt_move = e.mv();
                 let s = score_from_tt(e.score as i32, ply);
-                if !pv_node && e.depth as i32 >= depth {
+                if (if F_PVS { !pv_node } else { !root }) && e.depth as i32 >= depth {
                     let cut = match e.bound() {
                         BOUND_EXACT => true,
                         BOUND_LOWER => s >= beta,
@@ -602,6 +605,13 @@ impl Searcher {
                 }
                 // Futility pruning
                 if F_FP && depth <= 6 && static_eval + 100 + 100 * depth <= alpha {
+                    continue;
+                }
+            }
+            // SEE pruning of clearly losing moves at shallow depth
+            if F_SEE_PRUNE && !root && depth <= 8 && moves_searched > 0 && best_score > -MATE_BOUND {
+                let threshold = if is_quiet { -60 * depth } else { -25 * depth * depth };
+                if !gives_check && !see_ge(b, m, threshold) {
                     continue;
                 }
             }
@@ -721,11 +731,32 @@ impl Searcher {
             return if in_check { 0 } else { evaluate(b) };
         }
 
+        let mut tt_move = Move::NULL;
+        if F_QS_TT {
+            if let Some(e) = self.tt.probe(b.hash) {
+                tt_move = e.mv();
+                let s = score_from_tt(e.score as i32, ply);
+                let cut = match e.bound() {
+                    BOUND_EXACT => true,
+                    BOUND_LOWER => s >= beta,
+                    BOUND_UPPER => s <= alpha,
+                    _ => false,
+                };
+                if cut {
+                    return s;
+                }
+            }
+        }
+        let orig_alpha = alpha;
+        let mut best_move = Move::NULL;
+        let mut stand_pat = -INF;
+
         let mut best_score;
         if in_check {
             best_score = -INF;
         } else {
             let stand = evaluate(b);
+            stand_pat = stand;
             if stand >= beta {
                 return stand;
             }
@@ -741,7 +772,7 @@ impl Searcher {
             return -MATE + ply as i32;
         }
         let mut scores = [0i32; 256];
-        self.score_moves(b, &list, &mut scores, Move::NULL, MAX_PLY);
+        self.score_moves(b, &list, &mut scores, tt_move, MAX_PLY);
 
         for i in 0..list.len {
             let m = Self::pick(&mut list, &mut scores, i);
@@ -758,11 +789,22 @@ impl Searcher {
                 best_score = score;
                 if score > alpha {
                     alpha = score;
+                    best_move = m;
                     if score >= beta {
                         break;
                     }
                 }
             }
+        }
+        if F_QS_TT {
+            let bound = if best_score >= beta {
+                BOUND_LOWER
+            } else if alpha > orig_alpha {
+                BOUND_EXACT
+            } else {
+                BOUND_UPPER
+            };
+            self.tt.store(b.hash, best_move, score_to_tt(best_score, ply), stand_pat, 0, bound);
         }
         best_score
     }

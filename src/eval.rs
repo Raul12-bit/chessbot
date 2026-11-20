@@ -125,8 +125,21 @@ const EG_TABLE: [[i32; 64]; 6] = [
     -53, -34, -21, -11, -28, -14, -24, -43],
 ];
 
+/// Phase 5: switch from plain PeSTO to the tunable evaluation in `evalt.rs`.
+const USE_TUNABLE: bool = false;
+
 /// Evaluate from the side to move's perspective (centipawns).
+#[inline]
 pub fn evaluate(b: &Board) -> i32 {
+    if USE_TUNABLE {
+        crate::evalt::evaluate(b)
+    } else {
+        evaluate_pesto(b)
+    }
+}
+
+/// Plain PeSTO evaluation (material + PST, tapered).
+pub fn evaluate_pesto(b: &Board) -> i32 {
     let mut mg = [0i32; 2];
     let mut eg = [0i32; 2];
     let mut phase = 0;

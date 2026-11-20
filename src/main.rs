@@ -67,6 +67,41 @@ fn main() {
             let threads = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(10);
             chessbot::tune::run(data, out, epochs, limit, threads);
         }
+        Some("evalbench") => {
+            // evalbench <data.txt>: compare speed and values of PeSTO vs tunable eval
+            let path = args.get(2).map(|s| s.as_str()).unwrap_or("data/selfplay1.txt");
+            let Ok(text) = std::fs::read_to_string(path) else {
+                eprintln!("cannot read {path}");
+                return;
+            };
+            let boards: Vec<Board> = text
+                .lines()
+                .take(200_000)
+                .filter_map(|l| l.split('|').next().and_then(|f| Board::from_fen(f.trim()).ok()))
+                .collect();
+            let t = Instant::now();
+            let mut s1 = 0i64;
+            for b in &boards {
+                s1 += chessbot::eval::evaluate_pesto(b) as i64;
+            }
+            let t1 = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let mut s2 = 0i64;
+            let mut diff = 0i64;
+            for b in &boards {
+                let e = chessbot::evalt::evaluate(b) as i64;
+                s2 += e;
+                diff += (e - chessbot::eval::evaluate_pesto(b) as i64).abs();
+            }
+            let t2 = t.elapsed().as_secs_f64();
+            println!(
+                "{} positions: pesto {:.1} ns/eval (sum {s1}), evalt {:.1} ns/eval (sum {s2}), mean |diff| {:.1}",
+                boards.len(),
+                t1 * 1e9 / boards.len().max(1) as f64,
+                t2 * 1e9 / boards.len().max(1) as f64 / 2.0,
+                diff as f64 / boards.len().max(1) as f64
+            );
+        }
         _ => uci::run(),
     }
 }

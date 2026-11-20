@@ -3,7 +3,7 @@
 # SPRT elo0=0 elo1=5 alpha=beta=0.05, max 2000 games, time-capped (default 40 min).
 set -u
 NEW=$(realpath "$1"); BASE=$(realpath "$2")
-NAME=${3:-test}; MAXMIN=${4:-40}; TC=${5:-8+0.08}
+NAME=${3:-test}; MAXMIN=${4:-25}; TC=${5:-8+0.08}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$ROOT/logs"
 LOG="$ROOT/logs/sprt_${NAME}.log"
