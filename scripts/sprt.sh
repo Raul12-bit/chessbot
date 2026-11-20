@@ -14,9 +14,10 @@ timeout $((MAXMIN*60)) fastchess \
   -engine cmd="$(wpath "$BASE")" name=base \
   -each tc=$TC option.Hash=16 \
   -openings file="$(wpath "$ROOT/tests/books/uho_20k.epd")" format=epd order=random \
-  -rounds 1000 -games 2 -repeat -concurrency 10 -ratinginterval 20 \
+  -rounds 1000 -games 2 -repeat -concurrency 10 -ratinginterval 20 -recover \
+  -draw movenumber=40 movecount=8 score=10 -resign movecount=3 score=600 twosided=true \
   -sprt elo0=0 elo1=5 alpha=0.05 beta=0.05 \
   -pgnout file="sprt_${NAME}.pgn" > "$LOG" 2>&1
 rm -f "$ROOT/logs/config.json"
 echo "=== $NAME ($TC) ==="
-grep -E "^Elo:|^LLR|^Games:|H0 was|H1 was" "$LOG" | tail -5
+grep -E "Elo:|LLR|Games:|H0 was|H1 was" "$LOG" | tail -4

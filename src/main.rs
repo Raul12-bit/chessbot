@@ -49,6 +49,24 @@ fn main() {
             let depth = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
             bench(depth);
         }
+        Some("datagen") => {
+            // datagen <book.epd> <out.txt> <games> <threads> <nodes>
+            let book = args.get(2).map(|s| s.as_str()).unwrap_or("tests/books/uho_20k.epd");
+            let out = args.get(3).map(|s| s.as_str()).unwrap_or("data/selfplay.txt");
+            let games = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            let threads = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(10);
+            let nodes = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(5000);
+            chessbot::datagen::run(book, out, games, threads, nodes);
+        }
+        Some("tune") => {
+            // tune <data.txt> <out.rs> <epochs> <max_positions> <threads>
+            let data = args.get(2).map(|s| s.as_str()).unwrap_or("data/selfplay.txt");
+            let out = args.get(3).map(|s| s.as_str()).unwrap_or("data/eval_params_tuned.rs");
+            let epochs = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            let limit = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+            let threads = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(10);
+            chessbot::tune::run(data, out, epochs, limit, threads);
+        }
         _ => uci::run(),
     }
 }

@@ -1,12 +1,15 @@
 pub mod attacks;
 pub mod board;
+pub mod datagen;
 pub mod eval;
+pub mod eval_params;
+pub mod evalt;
 pub mod movegen;
 pub mod search;
 pub mod tt;
+pub mod tune;
 pub mod types;
 pub mod uci;
-
 /// Positions used by the `bench` command (node-count signature + speed check).
 pub const BENCH_FENS: &[&str] = &[
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",

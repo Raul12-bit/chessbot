@@ -265,7 +265,8 @@ impl Board {
         }
         b.side ^= 1;
         b.hash ^= z_side();
-        b.halfmove += 1;
+        // positions before a null move must not count as repetitions
+        b.halfmove = 0;
         b.checkers = 0;
         b
     }

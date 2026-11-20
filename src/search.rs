@@ -18,6 +18,29 @@ pub const MATE_BOUND: i32 = MATE - MAX_PLY as i32;
 const USE_TT: bool = !cfg!(feature = "weak");
 const USE_ORDERING: bool = !cfg!(feature = "weak");
 
+// Phase-4 search features. Each one is switched on only after passing its own SPRT test.
+const F_PVS: bool = true;
+const F_NMP: bool = true;
+const F_LMR: bool = false;
+const F_RFP: bool = false;
+const F_FP: bool = false;
+const F_LMP: bool = false;
+const F_CHECK_EXT: bool = false;
+const F_QS_SEE: bool = false;
+const F_IIR: bool = false;
+const F_CONT: bool = false;
+
+#[derive(Clone, Copy, Default)]
+struct StackEntry {
+    /// move played to reach the next ply (NULL for a null move)
+    mv: Move,
+    /// mailbox code (color*6+piece) of the moved piece
+    piece: usize,
+    static_eval: i32,
+}
+
+type ContHist = [[[[i16; 64]; 12]; 64]; 12];
+
 #[derive(Clone, Debug, Default)]
 pub struct Limits {
     pub depth: Option<i32>,
@@ -56,6 +79,10 @@ pub struct Searcher {
     node_limit: u64,
     stopped: bool,
     seldepth: usize,
+    stack: [StackEntry; MAX_PLY + 4],
+    counter: Box<[[Move; 64]; 12]>,
+    cont: Box<ContHist>,
+    lmr: Box<[[i32; 64]; 64]>,
 }
 
 /// Static exchange evaluation: does move `m` win at least `threshold` material?
@@ -147,6 +174,26 @@ fn format_score(score: i32) -> String {
 
 const MVV: [i32; 6] = [1, 3, 3, 5, 9, 0];
 
+fn new_cont_hist() -> Box<ContHist> {
+    // allocate on the heap directly (2.3 MB) to avoid a large stack temporary
+    let v: Vec<[[[i16; 64]; 12]; 64]> = vec![[[[0i16; 64]; 12]; 64]; 12];
+    let b: Box<[[[[i16; 64]; 12]; 64]]> = v.into_boxed_slice();
+    match b.try_into() {
+        Ok(a) => a,
+        Err(_) => unreachable!("length is 12"),
+    }
+}
+
+fn lmr_table() -> [[i32; 64]; 64] {
+    let mut t = [[0; 64]; 64];
+    for (d, row) in t.iter_mut().enumerate().skip(1) {
+        for (m, v) in row.iter_mut().enumerate().skip(1) {
+            *v = (0.75 + (d as f64).ln() * (m as f64).ln() / 2.25) as i32;
+        }
+    }
+    t
+}
+
 impl Searcher {
     pub fn new(hash_mb: usize, stop: Arc<AtomicBool>) -> Searcher {
         Searcher {
@@ -166,6 +213,10 @@ impl Searcher {
             node_limit: u64::MAX,
             stopped: false,
             seldepth: 0,
+            stack: [StackEntry::default(); MAX_PLY + 4],
+            counter: Box::new([[Move::NULL; 64]; 12]),
+            cont: new_cont_hist(),
+            lmr: Box::new(lmr_table()),
         }
     }
 
@@ -173,6 +224,8 @@ impl Searcher {
         self.tt.clear();
         *self.history = [[[0; 64]; 64]; 2];
         self.killers = [[Move::NULL; 2]; MAX_PLY + 2];
+        *self.counter = [[Move::NULL; 64]; 12];
+        self.cont = new_cont_hist();
     }
 
     pub fn resize_tt(&mut self, mb: usize) {
@@ -335,7 +388,33 @@ impl Searcher {
         SearchResult { best, score: best_score, depth: completed_depth, nodes: self.nodes }
     }
 
+
+    /// Continuation-history score of a quiet move (moved piece code `pc`) at `ply`.
+    #[inline(always)]
+    fn cont_score(&self, ply: usize, pc: usize, to: usize) -> i32 {
+        let mut s = 0;
+        if ply >= 1 {
+            let p = self.stack[ply - 1];
+            if !p.mv.is_null() {
+                s += self.cont[p.piece][p.mv.to()][pc][to] as i32;
+            }
+        }
+        if ply >= 2 {
+            let p = self.stack[ply - 2];
+            if !p.mv.is_null() {
+                s += self.cont[p.piece][p.mv.to()][pc][to] as i32;
+            }
+        }
+        s
+    }
+
     fn score_moves(&self, b: &Board, list: &MoveList, scores: &mut [i32; 256], tt_move: Move, ply: usize) {
+        let counter = if F_CONT && (1..MAX_PLY).contains(&ply) && !self.stack[ply - 1].mv.is_null() {
+            let p = self.stack[ply - 1];
+            self.counter[p.piece][p.mv.to()]
+        } else {
+            Move::NULL
+        };
         for i in 0..list.len {
             let m = list.moves[i];
             scores[i] = if !USE_ORDERING {
@@ -356,12 +435,18 @@ impl Searcher {
                 } else {
                     -2_000_000 + mvv_lva + promo
                 }
-            } else if m == self.killers[ply][0] {
+            } else if ply < MAX_PLY && m == self.killers[ply][0] {
+                1_000_002
+            } else if ply < MAX_PLY && m == self.killers[ply][1] {
                 1_000_001
-            } else if m == self.killers[ply][1] {
+            } else if m == counter {
                 1_000_000
             } else {
-                self.history[b.side][m.from()][m.to()]
+                let mut h = self.history[b.side][m.from()][m.to()];
+                if F_CONT && ply < MAX_PLY {
+                    h += self.cont_score(ply, b.mailbox[m.from()] as usize, m.to());
+                }
+                h
             };
         }
     }
@@ -384,7 +469,22 @@ impl Searcher {
         *h += bonus - *h * bonus.abs() / 16384;
     }
 
-    fn negamax(&mut self, b: &Board, mut alpha: i32, beta: i32, depth: i32, ply: usize) -> i32 {
+    fn update_cont(&mut self, ply: usize, pc: usize, to: usize, bonus: i32) {
+        for back in 1..=2 {
+            if ply >= back {
+                let p = self.stack[ply - back];
+                if !p.mv.is_null() {
+                    let e = &mut self.cont[p.piece][p.mv.to()][pc][to];
+                    let v = *e as i32;
+                    *e = (v + bonus - v * bonus.abs() / 16384) as i16;
+                }
+            }
+        }
+    }
+
+    fn negamax(&mut self, b: &Board, mut alpha: i32, beta: i32, mut depth: i32, ply: usize) -> i32 {
+        let pv_node = beta - alpha > 1;
+        let in_check = b.in_check();
         if depth <= 0 {
             return self.qsearch(b, alpha, beta, ply);
         }
@@ -395,7 +495,6 @@ impl Searcher {
             return 0;
         }
         let root = ply == 0;
-        let in_check = b.in_check();
         if ply > self.seldepth {
             self.seldepth = ply;
         }
@@ -415,7 +514,7 @@ impl Searcher {
             if let Some(e) = self.tt.probe(b.hash) {
                 tt_move = e.mv();
                 let s = score_from_tt(e.score as i32, ply);
-                if !root && e.depth as i32 >= depth {
+                if !pv_node && e.depth as i32 >= depth {
                     let cut = match e.bound() {
                         BOUND_EXACT => true,
                         BOUND_LOWER => s >= beta,
@@ -427,6 +526,48 @@ impl Searcher {
                     }
                 }
             }
+        }
+
+        let static_eval = if in_check { -INF } else { evaluate(b) };
+        self.stack[ply].static_eval = static_eval;
+        let improving = !in_check && ply >= 2 && static_eval > self.stack[ply - 2].static_eval;
+
+        if !pv_node && !in_check && !root {
+            // Reverse futility pruning
+            if F_RFP
+                && depth <= 7
+                && static_eval.abs() < MATE_BOUND
+                && static_eval - 75 * (depth - improving as i32) >= beta
+            {
+                return static_eval;
+            }
+
+            // Null-move pruning
+            if F_NMP
+                && depth >= 3
+                && static_eval >= beta
+                && !self.stack[ply - 1].mv.is_null()
+                && b.has_non_pawn_material(b.side)
+            {
+                let r = 3 + depth / 4 + ((static_eval - beta) / 200).min(3);
+                let nb = b.make_null();
+                self.stack[ply].mv = Move::NULL;
+                self.stack[ply].piece = 0;
+                self.hashes.push(b.hash);
+                let score = -self.negamax(&nb, -beta, -beta + 1, depth - r, ply + 1);
+                self.hashes.pop();
+                if self.stopped {
+                    return 0;
+                }
+                if score >= beta {
+                    return if score >= MATE_BOUND { beta } else { score };
+                }
+            }
+        }
+
+        // Internal iterative reduction: no TT move -> search shallower
+        if F_IIR && depth >= 4 && tt_move.is_null() {
+            depth -= 1;
         }
 
         let mut list = MoveList::new();
@@ -441,12 +582,59 @@ impl Searcher {
         let mut best_score = -INF;
         let mut best_move = Move::NULL;
         let mut quiets_tried = MoveList::new();
+        let mut moves_searched: i32 = 0;
 
         self.hashes.push(b.hash);
         for i in 0..list.len {
             let m = Self::pick(&mut list, &mut scores, i);
+            let is_quiet = !m.is_noisy();
             let nb = b.make_move(m);
-            let score = -self.negamax(&nb, -beta, -alpha, depth - 1, ply + 1);
+            let gives_check = nb.in_check();
+
+            // Shallow-depth pruning of quiet moves (never before a move has been searched)
+            if !root && is_quiet && !in_check && !gives_check && best_score > -MATE_BOUND && moves_searched > 0 {
+                // Late move pruning
+                if F_LMP && !pv_node && depth <= 8 {
+                    let limit = (3 + depth * depth) / (2 - improving as i32);
+                    if quiets_tried.len as i32 >= limit {
+                        continue;
+                    }
+                }
+                // Futility pruning
+                if F_FP && depth <= 6 && static_eval + 100 + 100 * depth <= alpha {
+                    continue;
+                }
+            }
+
+            self.stack[ply].mv = m;
+            self.stack[ply].piece = b.mailbox[m.from()] as usize;
+
+            let extension = if F_CHECK_EXT && gives_check { 1 } else { 0 };
+            let new_depth = depth - 1 + extension;
+
+            let score = if moves_searched == 0 || !F_PVS {
+                -self.negamax(&nb, -beta, -alpha, new_depth, ply + 1)
+            } else {
+                // Late move reductions
+                let mut r = 0;
+                if F_LMR && depth >= 3 && moves_searched >= 1 + pv_node as i32 + root as i32 && is_quiet {
+                    r = self.lmr[depth.min(63) as usize][(moves_searched as usize).min(63)];
+                    r -= pv_node as i32;
+                    r += !improving as i32;
+                    r -= gives_check as i32;
+                    r -= self.history[b.side][m.from()][m.to()] / 8192;
+                    r = r.clamp(0, (new_depth - 1).max(0));
+                }
+                let mut s = -self.negamax(&nb, -alpha - 1, -alpha, new_depth - r, ply + 1);
+                if s > alpha && r > 0 && !self.stopped {
+                    s = -self.negamax(&nb, -alpha - 1, -alpha, new_depth, ply + 1);
+                }
+                if s > alpha && s < beta && !self.stopped {
+                    s = -self.negamax(&nb, -beta, -alpha, new_depth, ply + 1);
+                }
+                s
+            };
+            moves_searched += 1;
             if self.stopped {
                 self.hashes.pop();
                 return 0;
@@ -464,26 +652,43 @@ impl Searcher {
                     }
                     self.pv_len[ply] = child_len + 1;
                     if score >= beta {
-                        if !m.is_noisy() && USE_ORDERING {
+                        if is_quiet && USE_ORDERING {
                             if self.killers[ply][0] != m {
                                 self.killers[ply][1] = self.killers[ply][0];
                                 self.killers[ply][0] = m;
                             }
                             let bonus = (depth * depth).min(1200);
                             self.update_history(b.side, m, bonus);
+                            let pc = b.mailbox[m.from()] as usize;
+                            if F_CONT {
+                                self.update_cont(ply, pc, m.to(), bonus);
+                                if ply >= 1 && !self.stack[ply - 1].mv.is_null() {
+                                    let p = self.stack[ply - 1];
+                                    self.counter[p.piece][p.mv.to()] = m;
+                                }
+                            }
                             for &q in quiets_tried.as_slice() {
                                 self.update_history(b.side, q, -bonus);
+                                if F_CONT {
+                                    let qpc = b.mailbox[q.from()] as usize;
+                                    self.update_cont(ply, qpc, q.to(), -bonus);
+                                }
                             }
                         }
                         break;
                     }
                 }
             }
-            if !m.is_noisy() {
+            if is_quiet {
                 quiets_tried.push(m);
             }
         }
         self.hashes.pop();
+
+        if moves_searched == 0 {
+            // cannot happen with the guards above; kept for safety
+            return static_eval.max(alpha);
+        }
 
         if USE_TT {
             let bound = if best_score >= beta {
@@ -493,7 +698,7 @@ impl Searcher {
             } else {
                 BOUND_UPPER
             };
-            self.tt.store(b.hash, best_move, score_to_tt(best_score, ply), 0, depth, bound);
+            self.tt.store(b.hash, best_move, score_to_tt(best_score, ply), static_eval, depth, bound);
         }
         best_score
     }
@@ -536,10 +741,14 @@ impl Searcher {
             return -MATE + ply as i32;
         }
         let mut scores = [0i32; 256];
-        self.score_moves(b, &list, &mut scores, Move::NULL, ply);
+        self.score_moves(b, &list, &mut scores, Move::NULL, MAX_PLY);
 
         for i in 0..list.len {
             let m = Self::pick(&mut list, &mut scores, i);
+            // SEE pruning: losing captures are sorted last, stop there
+            if F_QS_SEE && !in_check && scores[i] < 0 {
+                break;
+            }
             let nb = b.make_move(m);
             let score = -self.qsearch(&nb, -beta, -alpha, ply + 1);
             if self.stopped {

@@ -71,3 +71,28 @@ fn stalemate_and_mate_scores() {
     assert_eq!(list.len, 0);
     assert!(!b.in_check());
 }
+
+#[test]
+fn see_basic() {
+    use chessbot::search::see_ge;
+    chessbot::attacks::init_tables();
+    let cases: &[(&str, &str, i32, bool)] = &[
+        // rook wins an undefended pawn
+        ("1k1r4/1pp4p/p7/4p3/8/P5P1/1PP4P/2K1R3 w - - 0 1", "e1e5", 100, true),
+        ("1k1r4/1pp4p/p7/4p3/8/P5P1/1PP4P/2K1R3 w - - 0 1", "e1e5", 101, false),
+        // knight takes a pawn defended by a knight: loses material
+        ("1k1r3q/1ppn3p/p4b2/4p3/8/P2N2P1/1PP1R1BP/2K1Q3 w - - 0 1", "d3e5", 0, false),
+        // queen takes pawn defended by a pawn
+        ("4k3/8/3p4/4p3/8/8/8/4QK2 w - - 0 1", "e1e5", 0, false),
+        // pawn takes knight defended by pawn: +knight -pawn
+        ("4k3/8/3p4/4n3/3P4/8/8/4K3 w - - 0 1", "d4e5", 200, true),
+        // equal trade knight for knight
+        ("4k3/8/3p4/4n3/8/5N2/8/4K3 w - - 0 1", "f3e5", 0, true),
+        ("4k3/8/3p4/4n3/8/5N2/8/4K3 w - - 0 1", "f3e5", 1, false),
+    ];
+    for &(fen, mv, thr, expect) in cases {
+        let b = Board::from_fen(fen).unwrap();
+        let m = b.parse_uci_move(mv).expect("legal move");
+        assert_eq!(see_ge(&b, m, thr), expect, "{fen} {mv} >= {thr}");
+    }
+}
