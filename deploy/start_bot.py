@@ -1,7 +1,7 @@
 """Start lichess-bot with a chosen kind of games to look for (bullet / blitz / rapid / mixed).
 
 Run with the lichess-bot venv (start_bot.bat does this):
-    lichess-bot\\venv\\Scripts\\python.exe start_bot.py [bullet|blitz|rapid|mixed|none]
+    lichess-bot\\venv\\Scripts\\python.exe start_bot.py [bullet|blitz|rapid|fast|mixed|none]
 
 Reads lichess-bot/config.yml, writes lichess-bot/config_run.yml with the matchmaking section
 set for the chosen mode and starts `lichess-bot.py --config config_run.yml`.
@@ -31,8 +31,9 @@ MODES = {
     "blitz": ("Блиц", [(180, 0), (180, 2), (300, 0), (300, 3)]),
     "rapid": ("Рапид", [(600, 0), (600, 5), (900, 10)]),
 }
+MODES["fast"] = ("Пуля + блиц", MODES["bullet"][1] + MODES["blitz"][1])
 MODES["mixed"] = ("Всё вперемешку", MODES["bullet"][1] + MODES["blitz"][1] + MODES["rapid"][1])
-MENU = [("1", "bullet"), ("2", "blitz"), ("3", "rapid"), ("4", "mixed"), ("5", "none")]
+MENU = [("1", "bullet"), ("2", "blitz"), ("3", "rapid"), ("4", "fast"), ("5", "mixed"), ("6", "none")]
 
 
 def describe(tcs):
@@ -44,7 +45,7 @@ def choose_mode(argv):
         mode = argv[1].lower()
         if mode in MODES or mode == "none":
             return mode
-        print(f"Неизвестный режим '{argv[1]}'. Варианты: bullet, blitz, rapid, mixed, none.")
+        print(f"Неизвестный режим '{argv[1]}'. Варианты: bullet, blitz, rapid, fast, mixed, none.")
     print()
     print("Какие партии бот будет искать сам?")
     for key, mode in MENU:
@@ -55,13 +56,13 @@ def choose_mode(argv):
             print(f"  {key} — {name} ({describe(tcs)})")
     while True:
         try:
-            answer = input("Выбор [1-5]: ").strip()
+            answer = input("Выбор [1-6]: ").strip()
         except EOFError:
-            answer = "4"
+            answer = "5"
         for key, mode in MENU:
             if answer == key or answer.lower() == mode:
                 return mode
-        print("Введите число от 1 до 5.")
+        print("Введите число от 1 до 6.")
 
 
 def user_env_token():

@@ -1,6 +1,6 @@
 @echo off
 rem Start the Lichess bot with a choice of bullet / blitz / rapid (see start_bot.py).
-rem Usage: double-click, or: start_bot.bat [bullet|blitz|rapid|mixed|none]
+rem Usage: double-click, or: start_bot.bat [bullet|blitz|rapid|fast|mixed|none]
 chcp 65001 >nul
 cd /d "%~dp0lichess-bot"
 if not exist "venv\Scripts\python.exe" (
