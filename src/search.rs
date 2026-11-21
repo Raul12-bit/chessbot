@@ -32,6 +32,7 @@ const F_CONT: bool = false;
 // Extra features beyond the phase-4 list (also SPRT-gated).
 const F_QS_TT: bool = true;
 const F_SEE_PRUNE: bool = true;
+const F_TT_EVAL: bool = true;
 
 #[derive(Clone, Copy, Default)]
 struct StackEntry {
@@ -513,10 +514,12 @@ impl Searcher {
 
         // TT probe
         let mut tt_move = Move::NULL;
+        let mut tt_hit: Option<(i32, u8)> = None;
         if USE_TT {
             if let Some(e) = self.tt.probe(b.hash) {
                 tt_move = e.mv();
                 let s = score_from_tt(e.score as i32, ply);
+                tt_hit = Some((s, e.bound()));
                 if (if F_PVS { !pv_node } else { !root }) && e.depth as i32 >= depth {
                     let cut = match e.bound() {
                         BOUND_EXACT => true,
@@ -534,25 +537,36 @@ impl Searcher {
         let static_eval = if in_check { -INF } else { evaluate(b) };
         self.stack[ply].static_eval = static_eval;
         let improving = !in_check && ply >= 2 && static_eval > self.stack[ply - 2].static_eval;
+        // TT score as a better estimate than the static eval when its bound agrees
+        let mut eval = static_eval;
+        if F_TT_EVAL && !in_check {
+            if let Some((s, bound)) = tt_hit {
+                if s.abs() < MATE_BOUND
+                    && ((bound == BOUND_LOWER && s > eval) || (bound == BOUND_UPPER && s < eval) || bound == BOUND_EXACT)
+                {
+                    eval = s;
+                }
+            }
+        }
 
         if !pv_node && !in_check && !root {
             // Reverse futility pruning
             if F_RFP
                 && depth <= 7
-                && static_eval.abs() < MATE_BOUND
-                && static_eval - 75 * (depth - improving as i32) >= beta
+                && eval.abs() < MATE_BOUND
+                && eval - 75 * (depth - improving as i32) >= beta
             {
-                return static_eval;
+                return eval;
             }
 
             // Null-move pruning
             if F_NMP
                 && depth >= 3
-                && static_eval >= beta
+                && eval >= beta
                 && !self.stack[ply - 1].mv.is_null()
                 && b.has_non_pawn_material(b.side)
             {
-                let r = 3 + depth / 4 + ((static_eval - beta) / 200).min(3);
+                let r = 3 + depth / 4 + ((eval - beta) / 200).min(3);
                 let nb = b.make_null();
                 self.stack[ply].mv = Move::NULL;
                 self.stack[ply].piece = 0;
