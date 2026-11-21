@@ -19,7 +19,7 @@ use crate::board::Board;
 use crate::types::*;
 use std::sync::OnceLock;
 
-pub const HL: usize = 256;
+pub const HL: usize = if cfg!(feature = "hl512") { 512 } else { 256 };
 pub const INPUTS: usize = 768;
 pub const QA: i32 = 255;
 pub const QB: i32 = 64;
@@ -39,7 +39,10 @@ pub fn bucket(n_buckets: usize, pieces: usize) -> usize {
 }
 
 /// Default network compiled into the binary.
+#[cfg(not(feature = "hl512"))]
 static DEFAULT_NET: &[u8] = include_bytes!("../nets/default.nnue");
+#[cfg(feature = "hl512")]
+static DEFAULT_NET: &[u8] = include_bytes!("../nets/default512.nnue");
 
 pub struct Network {
     pub ft_w: Vec<i16>,

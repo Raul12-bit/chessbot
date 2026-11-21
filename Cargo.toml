@@ -8,6 +8,8 @@ edition = "2021"
 [features]
 # Phase-3 baseline without TT and move ordering (for the phase-3 acceptance test only)
 weak = []
+# NNUE with 512 hidden neurons instead of 256 (nets/default512.nnue is embedded)
+hl512 = []
 
 [profile.release]
 opt-level = 3
