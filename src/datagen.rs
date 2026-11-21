@@ -346,8 +346,12 @@ pub fn label(input: &str, out: &str, threads: usize, nodes: u64) {
                 searcher.silent = true;
                 let mut buf = Vec::new();
                 for (i, line) in part.iter().enumerate() {
-                    let mut it = line.split('|');
-                    let (Some(fen), Some(res)) = (it.next(), it.next()) else { continue };
+                    // `FEN | result` or `FEN | old score | result`: the result is the last field
+                    let fields: Vec<&str> = line.split('|').collect();
+                    if fields.len() < 2 {
+                        continue;
+                    }
+                    let (fen, res) = (fields[0], fields[fields.len() - 1]);
                     let Ok(b) = Board::from_fen(fen.trim()) else { continue };
                     if b.in_check() {
                         continue;
