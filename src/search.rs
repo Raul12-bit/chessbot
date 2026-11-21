@@ -49,7 +49,7 @@ const F_HIST_SCALE: bool = true;
 /// Delta pruning in qsearch: skip captures that cannot raise the score to alpha.
 const F_QS_FUT: bool = false;
 /// Razoring: hopeless shallow nodes drop straight into qsearch.
-const F_RAZOR: bool = false;
+const F_RAZOR: bool = true;
 /// Singular extensions (+ multi-cut) for the TT move.
 const F_SE: bool = true;
 /// Capture history in the ordering of captures (instead of plain MVV-LVA).
