@@ -25,9 +25,9 @@ const F_LMR: bool = true;
 const F_RFP: bool = true;
 const F_FP: bool = false;
 const F_LMP: bool = true;
-const F_CHECK_EXT: bool = true;
-const F_QS_SEE: bool = false;
-const F_IIR: bool = false;
+const F_CHECK_EXT: bool = false;
+const F_QS_SEE: bool = true;
+const F_IIR: bool = true;
 const F_CONT: bool = false;
 // Extra features beyond the phase-4 list (also SPRT-gated).
 const F_QS_TT: bool = false;
