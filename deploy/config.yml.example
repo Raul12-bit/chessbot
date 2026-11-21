@@ -36,7 +36,12 @@ engine:
     lichess_opening_explorer:
       enabled: false
     online_egtb:
-      enabled: false
+      enabled: true                # Lichess tablebase (perfect play with <= 7 pieces), not an engine
+      min_time: 5
+      max_time: 10800
+      max_pieces: 7
+      source: "lichess"
+      move_quality: "best"
 
   lichess_bot_tbs:
     syzygy:

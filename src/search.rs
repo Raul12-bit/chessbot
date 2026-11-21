@@ -44,6 +44,8 @@ const F_QS_TT: bool = true;
 const F_SEE_PRUNE: bool = true;
 const F_TT_EVAL: bool = true;
 const F_HIST_PRUNE: bool = false;
+/// History bonus 150*d-100 (capped 1800) instead of d^2 (capped 1200): histories actually move.
+const F_HIST_SCALE: bool = false;
 /// Singular extensions (+ multi-cut) for the TT move.
 const F_SE: bool = true;
 /// Capture history in the ordering of captures (instead of plain MVV-LVA).
@@ -695,6 +697,15 @@ impl Searcher {
         *h += bonus - *h * bonus.abs() / 16384;
     }
 
+    #[inline(always)]
+    fn hist_bonus(depth: i32) -> i32 {
+        if F_HIST_SCALE {
+            (150 * depth - 100).clamp(50, 1800)
+        } else {
+            (depth * depth).min(1200)
+        }
+    }
+
     fn update_history(&mut self, side: usize, m: Move, bonus: i32) {
         let h = &mut self.history[side][m.from()][m.to()];
         *h += bonus - *h * bonus.abs() / 16384;
@@ -925,7 +936,11 @@ impl Searcher {
                     r -= pv_node as i32;
                     r += !improving as i32;
                     r -= gives_check as i32;
-                    r -= self.history[b.side][m.from()][m.to()] / 8192;
+                    let mut h = self.history[b.side][m.from()][m.to()];
+                    if F_CONT {
+                        h += self.cont_score(ply, b.mailbox[m.from()] as usize, m.to());
+                    }
+                    r -= h / 8192;
                     r = r.clamp(0, (new_depth - 1).max(0));
                 }
                 let mut s = -self.negamax(&nb, -alpha - 1, -alpha, new_depth - r, ply + 1);
@@ -956,7 +971,7 @@ impl Searcher {
                     self.pv_len[ply] = child_len + 1;
                     if score >= beta {
                         if F_CAPHIST && USE_ORDERING {
-                            let bonus = (depth * depth).min(1200);
+                            let bonus = Self::hist_bonus(depth);
                             if m.is_capture() {
                                 self.update_cap_hist(b, m, bonus);
                             }
@@ -969,7 +984,7 @@ impl Searcher {
                                 self.killers[ply][1] = self.killers[ply][0];
                                 self.killers[ply][0] = m;
                             }
-                            let bonus = (depth * depth).min(1200);
+                            let bonus = Self::hist_bonus(depth);
                             self.update_history(b.side, m, bonus);
                             let pc = b.mailbox[m.from()] as usize;
                             if F_CONT {
