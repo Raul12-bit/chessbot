@@ -46,6 +46,10 @@ const F_TT_EVAL: bool = true;
 const F_HIST_PRUNE: bool = false;
 /// History bonus 150*d-100 (capped 1800) instead of d^2 (capped 1200): histories actually move.
 const F_HIST_SCALE: bool = false;
+/// Delta pruning in qsearch: skip captures that cannot raise the score to alpha.
+const F_QS_FUT: bool = false;
+/// Razoring: hopeless shallow nodes drop straight into qsearch.
+const F_RAZOR: bool = false;
 /// Singular extensions (+ multi-cut) for the TT move.
 const F_SE: bool = true;
 /// Capture history in the ordering of captures (instead of plain MVV-LVA).
@@ -791,6 +795,16 @@ impl Searcher {
         }
 
         if !pv_node && !in_check && !root && excluded.is_null() {
+            // Razoring: far below alpha at low depth -> verify with qsearch only
+            if F_RAZOR && depth <= 3 && eval.abs() < MATE_BOUND && eval + 250 * depth <= alpha {
+                let v = self.qsearch(b, alpha, alpha + 1, ply);
+                if self.stopped {
+                    return 0;
+                }
+                if v <= alpha {
+                    return v;
+                }
+            }
             // Reverse futility pruning
             if F_RFP
                 && depth <= 7
@@ -1115,6 +1129,13 @@ impl Searcher {
             // SEE pruning: losing captures are sorted last, stop there
             if F_QS_SEE && !in_check && scores[i] < 0 {
                 break;
+            }
+            // Delta pruning: even winning the captured piece (plus a margin) stays below alpha
+            if F_QS_FUT && !in_check && !m.is_promo() && best_score > -MATE_BOUND {
+                let victim = if m.flags() == EP_CAPTURE { PAWN } else { b.piece_on(m.to()).unwrap_or(PAWN) };
+                if stand_pat + SEE_VALUE[victim] + 200 <= alpha {
+                    continue;
+                }
             }
             let nb = b.make_move(m);
             self.push_acc(b, &nb, ply);
