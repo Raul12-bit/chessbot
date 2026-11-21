@@ -10,7 +10,7 @@ engine:
   debug: false
   working_dir: ""
   protocol: "uci"
-  ponder: false                    # engine does not support pondering
+  ponder: true                     # engine ponders (go ponder / ponderhit)
 
   polyglot:
     enabled: false
