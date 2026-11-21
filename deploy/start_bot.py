@@ -64,6 +64,19 @@ def choose_mode(argv):
         print("Введите число от 1 до 5.")
 
 
+def user_env_token():
+    """LICHESS_BOT_TOKEN from the Windows user environment (set with SetEnvironmentVariable ... "User"),
+    which processes started before it was set do not inherit."""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, "LICHESS_BOT_TOKEN")
+            return str(value).strip()
+    except (ImportError, OSError):
+        return ""
+
+
 def matchmaking_section(base, mode):
     mm = dict(base or {})
     if mode == "none":
@@ -106,7 +119,14 @@ def main():
 
     env = dict(os.environ)
     token_in_config = str(config.get("token", ""))
+    if not env.get("LICHESS_BOT_TOKEN"):
+        env_token = user_env_token()
+        if env_token:
+            env["LICHESS_BOT_TOKEN"] = env_token
     if not env.get("LICHESS_BOT_TOKEN") and (not token_in_config or token_in_config.startswith("set-")):
+        if not sys.stdin.isatty():
+            print("Нет токена: задайте переменную LICHESS_BOT_TOKEN (см. deploy/README.md).")
+            return 1
         token = getpass.getpass("API-токен Lichess (ввод скрыт, никуда не сохраняется): ").strip()
         if not token:
             print("Токен не введён.")
