@@ -23,7 +23,7 @@ const F_PVS: bool = true;
 const F_NMP: bool = true;
 const F_LMR: bool = true;
 const F_RFP: bool = true;
-const F_FP: bool = false;
+const F_FP: bool = true;
 const F_LMP: bool = true;
 const F_CHECK_EXT: bool = false;
 const F_QS_SEE: bool = true;
@@ -33,6 +33,7 @@ const F_CONT: bool = false;
 const F_QS_TT: bool = true;
 const F_SEE_PRUNE: bool = true;
 const F_TT_EVAL: bool = true;
+const F_HIST_PRUNE: bool = false;
 
 #[derive(Clone, Copy, Default)]
 struct StackEntry {
@@ -617,8 +618,12 @@ impl Searcher {
                         continue;
                     }
                 }
+                // History pruning: quiet moves that consistently failed low
+                if F_HIST_PRUNE && !pv_node && depth <= 3 && self.history[b.side][m.from()][m.to()] < -1024 * depth {
+                    continue;
+                }
                 // Futility pruning
-                if F_FP && depth <= 6 && static_eval + 100 + 100 * depth <= alpha {
+                if F_FP && !pv_node && depth <= 4 && eval + 150 + 80 * depth <= alpha {
                     continue;
                 }
             }
