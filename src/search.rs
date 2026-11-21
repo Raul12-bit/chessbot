@@ -45,7 +45,7 @@ const F_SEE_PRUNE: bool = true;
 const F_TT_EVAL: bool = true;
 const F_HIST_PRUNE: bool = false;
 /// History bonus 150*d-100 (capped 1800) instead of d^2 (capped 1200): histories actually move.
-const F_HIST_SCALE: bool = false;
+const F_HIST_SCALE: bool = true;
 /// Delta pruning in qsearch: skip captures that cannot raise the score to alpha.
 const F_QS_FUT: bool = false;
 /// Razoring: hopeless shallow nodes drop straight into qsearch.
