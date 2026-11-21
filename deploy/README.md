@@ -18,7 +18,33 @@
    которые попадают в git. Храните только в переменной окружения или в локальном
    `config.yml` (он в `.gitignore`).
 
-## 3. Установка lichess-bot (Windows, Git Bash)
+## 3. Установка lichess-bot
+
+### PowerShell
+
+Активировать venv не обязательно: достаточно вызывать `venv\Scripts\python.exe` напрямую.
+Так не придётся менять ExecutionPolicy, которая обычно блокирует `Activate.ps1`.
+
+```powershell
+cd C:\dev\chessbot\deploy
+git clone https://github.com/lichess-bot-devs/lichess-bot.git
+cd lichess-bot
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+New-Item -ItemType Directory -Force engines
+Copy-Item ..\..\bins\best.exe engines\chessbot.exe
+Copy-Item ..\config.yml.example config.yml
+```
+
+Апгрейд в BOT и запуск в PowerShell (переменная живёт только в текущем окне):
+
+```powershell
+$env:LICHESS_BOT_TOKEN = "<ваш токен>"
+.\venv\Scripts\python.exe lichess-bot.py -u   # один раз, необратимо (см. раздел 4)
+.\venv\Scripts\python.exe lichess-bot.py      # запуск бота
+```
+
+### Git Bash
 
 ```bash
 cd /c/dev/chessbot/deploy
