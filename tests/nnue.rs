@@ -45,8 +45,9 @@ fn incremental_matches_refresh() {
                 let mut full = Accumulator::default();
                 full.refresh(&nb);
                 assert!(inc.v == full.v, "accumulator mismatch after {} -> {}", b.to_fen(), nb.to_fen());
-                assert_eq!(inc.evaluate(nb.side), nnue::evaluate(&nb));
-                assert_eq!(inc.evaluate(nb.side), inc.evaluate_scalar(nnue::net(), nb.side));
+                let pieces = nb.occ().count_ones() as usize;
+                assert_eq!(inc.evaluate(nb.side, pieces), nnue::evaluate(&nb));
+                assert_eq!(inc.evaluate(nb.side, pieces), inc.evaluate_scalar(nnue::net(), nb.side, pieces));
                 checked += 1;
                 acc = inc;
                 b = nb;

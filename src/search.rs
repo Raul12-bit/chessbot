@@ -310,7 +310,7 @@ impl Searcher {
     #[inline(always)]
     fn raw_eval(&self, b: &Board, ply: usize) -> i32 {
         if F_NNUE {
-            self.acc[ply].evaluate(b.side).clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
+            self.acc[ply].evaluate(b.side, popcnt(b.occ()) as usize).clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
         } else {
             evaluate(b)
         }

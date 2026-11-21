@@ -7,8 +7,13 @@
 //! Quantization (as in the bullet trainer's simple example): feature transformer x QA (i16),
 //! output weights x QB (i16), output bias x QA*QB (i32); eval = out * SCALE / (QA*QB).
 //!
-//! Network file: magic `CBNNUE01`, `HL: u32`, then little endian: ft_w[768*HL] i16 (row per
-//! input feature), ft_b[HL] i16, out_w[2*HL] i16 (side to move half first), out_b i32.
+//! Output buckets: the output layer is chosen by the number of pieces on the board
+//! (8 buckets: 2-5, 6-9, ..., 30-32 pieces), so openings and endgames get their own weights.
+//!
+//! Network file: magic `CBNNUE02`, `HL: u32`, `buckets: u32`, then little endian:
+//! ft_w[768*HL] i16 (row per input feature), ft_b[HL] i16,
+//! out_w[buckets][2*HL] i16 (side to move half first), out_b[buckets] i32.
+//! (`CBNNUE01` = the same without the bucket count, one bucket.)
 
 use crate::board::Board;
 use crate::types::*;
@@ -19,7 +24,19 @@ pub const INPUTS: usize = 768;
 pub const QA: i32 = 255;
 pub const QB: i32 = 64;
 pub const SCALE: i32 = 400;
-pub const MAGIC: &[u8; 8] = b"CBNNUE01";
+pub const MAGIC_V1: &[u8; 8] = b"CBNNUE01";
+pub const MAGIC: &[u8; 8] = b"CBNNUE02";
+pub const MAX_BUCKETS: usize = 8;
+
+/// Output bucket for a position with `pieces` pieces (kings included).
+#[inline(always)]
+pub fn bucket(n_buckets: usize, pieces: usize) -> usize {
+    if n_buckets <= 1 {
+        0
+    } else {
+        (pieces.saturating_sub(2) / (32 / n_buckets)).min(n_buckets - 1)
+    }
+}
 
 /// Default network compiled into the binary.
 static DEFAULT_NET: &[u8] = include_bytes!("../nets/default.nnue");
@@ -28,22 +45,35 @@ pub struct Network {
     pub ft_w: Vec<i16>,
     pub ft_b: Vec<i16>,
     pub out_w: Vec<i16>,
-    pub out_b: i32,
+    pub out_b: Vec<i32>,
+    pub buckets: usize,
 }
 
 static NET: OnceLock<Network> = OnceLock::new();
 
 impl Network {
     pub fn from_bytes(b: &[u8]) -> Result<Network, String> {
-        let need = 12 + 2 * (INPUTS * HL + HL + 2 * HL) + 4;
-        if b.len() != need || &b[..8] != MAGIC {
-            return Err(format!("bad network: {} bytes, expected {need}", b.len()));
+        if b.len() < 16 {
+            return Err("bad network: too short".into());
         }
+        let (buckets, mut pos) = if &b[..8] == MAGIC_V1 {
+            (1usize, 12usize)
+        } else if &b[..8] == MAGIC {
+            (u32::from_le_bytes([b[12], b[13], b[14], b[15]]) as usize, 16usize)
+        } else {
+            return Err("bad network: unknown format".into());
+        };
         let hl = u32::from_le_bytes([b[8], b[9], b[10], b[11]]) as usize;
         if hl != HL {
             return Err(format!("network has {hl} hidden neurons, engine expects {HL}"));
         }
-        let mut pos = 12;
+        if buckets == 0 || buckets > MAX_BUCKETS || 32 % buckets != 0 {
+            return Err(format!("bad network: {buckets} output buckets"));
+        }
+        let need = pos + 2 * (INPUTS * HL + HL + buckets * 2 * HL) + 4 * buckets;
+        if b.len() != need {
+            return Err(format!("bad network: {} bytes, expected {need}", b.len()));
+        }
         let mut read = |n: usize| -> Vec<i16> {
             let v = b[pos..pos + 2 * n].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
             pos += 2 * n;
@@ -51,23 +81,27 @@ impl Network {
         };
         let ft_w = read(INPUTS * HL);
         let ft_b = read(HL);
-        let out_w = read(2 * HL);
-        let out_b = i32::from_le_bytes([b[pos], b[pos + 1], b[pos + 2], b[pos + 3]]);
+        let out_w = read(buckets * 2 * HL);
+        let out_b: Vec<i32> =
+            b[pos..pos + 4 * buckets].chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         // the SIMD output layer needs clamp(acc) * w to fit in i16
         if out_w.iter().any(|&w| !(-127..=127).contains(&w)) {
             return Err("output weights outside [-127, 127]".into());
         }
-        Ok(Network { ft_w, ft_b, out_w, out_b })
+        Ok(Network { ft_w, ft_b, out_w, out_b, buckets })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(12 + 2 * (INPUTS * HL + 3 * HL) + 4);
+        let mut v = Vec::new();
         v.extend_from_slice(MAGIC);
         v.extend_from_slice(&(HL as u32).to_le_bytes());
+        v.extend_from_slice(&(self.buckets as u32).to_le_bytes());
         for x in self.ft_w.iter().chain(self.ft_b.iter()).chain(self.out_w.iter()) {
             v.extend_from_slice(&x.to_le_bytes());
         }
-        v.extend_from_slice(&self.out_b.to_le_bytes());
+        for x in &self.out_b {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
         v
     }
 }
@@ -176,25 +210,27 @@ impl Accumulator {
         }
     }
 
-    /// Evaluation in centipawns from the point of view of `stm`.
+    /// Evaluation in centipawns from the point of view of `stm`; `pieces` = pieces on the board.
     #[inline(always)]
-    pub fn evaluate(&self, stm: usize) -> i32 {
-        self.evaluate_with(net(), stm)
+    pub fn evaluate(&self, stm: usize, pieces: usize) -> i32 {
+        self.evaluate_with(net(), stm, pieces)
     }
 
     #[inline(always)]
-    pub fn evaluate_with(&self, n: &Network, stm: usize) -> i32 {
-        let (w_us, w_them) = n.out_w.split_at(HL);
+    pub fn evaluate_with(&self, n: &Network, stm: usize, pieces: usize) -> i32 {
+        let k = bucket(n.buckets, pieces);
+        let (w_us, w_them) = n.out_w[k * 2 * HL..(k + 1) * 2 * HL].split_at(HL);
         let sum = screlu_dot(&self.v[stm], w_us) + screlu_dot(&self.v[stm ^ 1], w_them);
-        let out = sum / QA as i64 + n.out_b as i64;
+        let out = sum / QA as i64 + n.out_b[k] as i64;
         (out * SCALE as i64 / (QA * QB) as i64) as i32
     }
 
     /// Reference implementation (scalar), used by tests.
-    pub fn evaluate_scalar(&self, n: &Network, stm: usize) -> i32 {
-        let (w_us, w_them) = n.out_w.split_at(HL);
+    pub fn evaluate_scalar(&self, n: &Network, stm: usize, pieces: usize) -> i32 {
+        let k = bucket(n.buckets, pieces);
+        let (w_us, w_them) = n.out_w[k * 2 * HL..(k + 1) * 2 * HL].split_at(HL);
         let sum = screlu_dot_scalar(&self.v[stm], w_us) + screlu_dot_scalar(&self.v[stm ^ 1], w_them);
-        let out = sum / QA as i64 + n.out_b as i64;
+        let out = sum / QA as i64 + n.out_b[k] as i64;
         (out * SCALE as i64 / (QA * QB) as i64) as i32
     }
 }
@@ -255,5 +291,5 @@ pub fn evaluate(b: &Board) -> i32 {
 pub fn evaluate_with(n: &Network, b: &Board) -> i32 {
     let mut acc = Accumulator::default();
     acc.refresh_with(n, b);
-    acc.evaluate_with(n, b.side)
+    acc.evaluate_with(n, b.side, popcnt(b.occ()) as usize)
 }

@@ -10,7 +10,7 @@
 //! Optimizer: Adam with weight clipping to [-1.98, 1.98] (keeps quantized values in range).
 
 use crate::board::Board;
-use crate::nnue::{feature, Network, HL, INPUTS, QA, QB, SCALE};
+use crate::nnue::{bucket, feature, Network, HL, INPUTS, QA, QB, SCALE};
 use crate::types::*;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::time::Instant;
@@ -111,7 +111,9 @@ fn float_eval(p: &[f32], rec: &Packed) -> f32 {
     let mut fu = [0u16; 32];
     let mut ft = [0u16; 32];
     let n = rec.features(&mut fu, &mut ft);
-    let mut out = p[OUT_B];
+    let k = bucket(NB, n);
+    let ow = OUT_W + k * 2 * HL;
+    let mut out = p[OUT_B + k];
     for h in 0..HL {
         let (mut a, mut b) = (p[FT_B + h], p[FT_B + h]);
         for i in 0..n {
@@ -119,7 +121,7 @@ fn float_eval(p: &[f32], rec: &Packed) -> f32 {
             b += p[FT_W + ft[i] as usize * HL + h];
         }
         let (a, b) = (a.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
-        out += a * a * p[OUT_W + h] + b * b * p[OUT_W + HL + h];
+        out += a * a * p[ow + h] + b * b * p[ow + HL + h];
     }
     out * SCALE as f32
 }
@@ -193,9 +195,11 @@ fn load(path: &str, limit: usize) -> Result<Vec<Packed>, String> {
 // flat parameter layout
 const FT_W: usize = 0;
 const FT_B: usize = INPUTS * HL;
+/// output buckets by piece count (see `nnue::bucket`)
+pub const NB: usize = 8;
 const OUT_W: usize = FT_B + HL;
-const OUT_B: usize = OUT_W + 2 * HL;
-const N_PARAMS: usize = OUT_B + 1;
+const OUT_B: usize = OUT_W + NB * 2 * HL;
+const N_PARAMS: usize = OUT_B + NB;
 
 struct Rng(u64);
 impl Rng {
@@ -233,8 +237,10 @@ fn fwd_bwd(p: &[f32], g: &mut [f32], rec: &Packed, wdl: f32, accs: &mut [[f32; H
             ta[h] += wt[h];
         }
     }
-    let (ow_u, ow_t) = p[OUT_W..OUT_W + 2 * HL].split_at(HL);
-    let mut out = p[OUT_B];
+    let k = bucket(NB, n);
+    let ow = OUT_W + k * 2 * HL;
+    let (ow_u, ow_t) = p[ow..ow + 2 * HL].split_at(HL);
+    let mut out = p[OUT_B + k];
     for h in 0..HL {
         let a = ua[h].clamp(0.0, 1.0);
         let b = ta[h].clamp(0.0, 1.0);
@@ -244,10 +250,10 @@ fn fwd_bwd(p: &[f32], g: &mut [f32], rec: &Packed, wdl: f32, accs: &mut [[f32; H
     let target = wdl * (rec.result as f32 * 0.5) + (1.0 - wdl) * sigmoid(rec.score as f32 / SCALE as f32);
     let err = pred - target;
     let d = 2.0 * err * pred * (1.0 - pred);
-    g[OUT_B] += d;
+    g[OUT_B + k] += d;
     // output layer and the gradient flowing back into the accumulators (reuse ua / ta)
     {
-        let (gu, gt) = g[OUT_W..OUT_W + 2 * HL].split_at_mut(HL);
+        let (gu, gt) = g[ow..ow + 2 * HL].split_at_mut(HL);
         for h in 0..HL {
             let (a, b) = (ua[h], ta[h]);
             let (ca, cb) = (a.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
@@ -292,7 +298,8 @@ fn quantize(p: &[f32]) -> Network {
         ft_w: p[FT_W..FT_B].iter().map(|&x| q(x, QA as f32)).collect(),
         ft_b: p[FT_B..OUT_W].iter().map(|&x| q(x, QA as f32)).collect(),
         out_w: p[OUT_W..OUT_B].iter().map(|&x| q(x, QB as f32)).collect(),
-        out_b: (p[OUT_B] * (QA * QB) as f32).round() as i32,
+        out_b: p[OUT_B..OUT_B + NB].iter().map(|&x| (x * (QA * QB) as f32).round() as i32).collect(),
+        buckets: NB,
     }
 }
 
