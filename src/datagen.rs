@@ -316,3 +316,62 @@ fn play_game_scored(searcher: &mut Searcher, start: Board, nodes: u64, rng: &mut
     };
     (recs, result)
 }
+
+/// Label existing positions (`FEN | result`, e.g. Texel data or GM games) with a search
+/// score for NNUE training: writes `FEN | score | result` (White's point of view).
+/// Positions in check, with a noisy best move or a mate score are dropped.
+pub fn label(input: &str, out: &str, threads: usize, nodes: u64) {
+    let lines: Vec<String> = match File::open(input) {
+        Ok(f) => BufReader::new(f).lines().map_while(Result::ok).collect(),
+        Err(e) => {
+            eprintln!("cannot open {input}: {e}");
+            return;
+        }
+    };
+    let writer = match std::fs::OpenOptions::new().create(true).append(true).open(out) {
+        Ok(f) => Mutex::new(BufWriter::new(f)),
+        Err(e) => {
+            eprintln!("cannot open {out}: {e}");
+            return;
+        }
+    };
+    let t0 = Instant::now();
+    let kept = AtomicU64::new(0);
+    let chunk = lines.len().div_ceil(threads.max(1));
+    std::thread::scope(|s| {
+        for part in lines.chunks(chunk.max(1)) {
+            let (writer, kept) = (&writer, &kept);
+            s.spawn(move || {
+                let mut searcher = Searcher::new(8, Arc::new(AtomicBool::new(false)));
+                searcher.silent = true;
+                let mut buf = Vec::new();
+                for (i, line) in part.iter().enumerate() {
+                    let mut it = line.split('|');
+                    let (Some(fen), Some(res)) = (it.next(), it.next()) else { continue };
+                    let Ok(b) = Board::from_fen(fen.trim()) else { continue };
+                    if b.in_check() {
+                        continue;
+                    }
+                    let r = searcher.search(&b, &[], &Limits { nodes: Some(nodes), depth: Some(64), ..Default::default() });
+                    if r.best.is_null() || r.best.is_noisy() || r.score.abs() >= MATE_BOUND {
+                        continue;
+                    }
+                    let sw = if b.side == WHITE { r.score } else { -r.score };
+                    buf.push(format!("{} | {sw} | {}", fen.trim(), res.trim()));
+                    if buf.len() >= 4096 || i + 1 == part.len() {
+                        kept.fetch_add(buf.len() as u64, Ordering::Relaxed);
+                        if let Ok(mut w) = writer.lock() {
+                            for l in buf.drain(..) {
+                                let _ = writeln!(w, "{l}");
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    if let Ok(mut w) = writer.lock() {
+        let _ = w.flush();
+    }
+    eprintln!("labelled {} of {} positions in {:.0}s", kept.load(Ordering::Relaxed), lines.len(), t0.elapsed().as_secs_f64());
+}

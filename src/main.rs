@@ -65,8 +65,14 @@ fn main() {
             chessbot::datagen::run(book, out, games, threads, nodes);
         }
         Some("datagen2") => {
-            // datagen2 <book.epd> <gm.txt> <out.txt> <games> <threads> <nodes>: NNUE data (FEN | score | result)
+            // datagen2 <book.epd> <gm.txt> <out.txt> <games> <threads> <nodes> [net.nnue]: NNUE data (FEN | score | result)
             let a = |i: usize, d: &str| args.get(i).cloned().unwrap_or_else(|| d.to_string());
+            if let Some(net) = args.get(8) {
+                if let Err(e) = chessbot::nnue::load_net(net) {
+                    eprintln!("{e}");
+                    return;
+                }
+            }
             chessbot::datagen::run_nnue(
                 &a(2, "tests/books/uho_20k.epd"),
                 &a(3, "data/gm.txt"),
@@ -75,6 +81,11 @@ fn main() {
                 a(6, "11").parse().unwrap_or(11),
                 a(7, "5000").parse().unwrap_or(5000),
             );
+        }
+        Some("nnue-label") => {
+            // nnue-label <in.txt (FEN | result)> <out.txt> <threads> <nodes>
+            let a = |i: usize, d: &str| args.get(i).cloned().unwrap_or_else(|| d.to_string());
+            chessbot::datagen::label(&a(2, "data/all.txt"), &a(3, "data/nnue/labelled.txt"), a(4, "11").parse().unwrap_or(11), a(5, "1500").parse().unwrap_or(1500));
         }
         Some("nnue-pack") => {
             // nnue-pack <out.bin> <max_abs_score> <in.txt...>

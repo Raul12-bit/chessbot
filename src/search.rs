@@ -51,7 +51,7 @@ const F_CAPHIST: bool = false;
 /// Correction history: static eval corrected by what searches found for this pawn structure.
 const F_CORR: bool = true;
 /// NNUE evaluation instead of the hand-crafted one.
-const F_NNUE: bool = false;
+const F_NNUE: bool = true;
 const CORR_SIZE: usize = 16384;
 const CORR_GRAIN: i32 = 256;
 const CORR_MAX: i32 = CORR_GRAIN * 32;

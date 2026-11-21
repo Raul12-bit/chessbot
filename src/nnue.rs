@@ -53,6 +53,10 @@ impl Network {
         let ft_b = read(HL);
         let out_w = read(2 * HL);
         let out_b = i32::from_le_bytes([b[pos], b[pos + 1], b[pos + 2], b[pos + 3]]);
+        // the SIMD output layer needs clamp(acc) * w to fit in i16
+        if out_w.iter().any(|&w| !(-127..=127).contains(&w)) {
+            return Err("output weights outside [-127, 127]".into());
+        }
         Ok(Network { ft_w, ft_b, out_w, out_b })
     }
 
@@ -180,21 +184,67 @@ impl Accumulator {
 
     #[inline(always)]
     pub fn evaluate_with(&self, n: &Network, stm: usize) -> i32 {
-        let us = &self.v[stm];
-        let them = &self.v[stm ^ 1];
         let (w_us, w_them) = n.out_w.split_at(HL);
-        let mut sum: i64 = 0;
-        for h in 0..HL {
-            let x = us[h].clamp(0, QA as i16) as i32;
-            sum += (x * x * w_us[h] as i32) as i64;
-        }
-        for h in 0..HL {
-            let x = them[h].clamp(0, QA as i16) as i32;
-            sum += (x * x * w_them[h] as i32) as i64;
-        }
+        let sum = screlu_dot(&self.v[stm], w_us) + screlu_dot(&self.v[stm ^ 1], w_them);
         let out = sum / QA as i64 + n.out_b as i64;
         (out * SCALE as i64 / (QA * QB) as i64) as i32
     }
+
+    /// Reference implementation (scalar), used by tests.
+    pub fn evaluate_scalar(&self, n: &Network, stm: usize) -> i32 {
+        let (w_us, w_them) = n.out_w.split_at(HL);
+        let sum = screlu_dot_scalar(&self.v[stm], w_us) + screlu_dot_scalar(&self.v[stm ^ 1], w_them);
+        let out = sum / QA as i64 + n.out_b as i64;
+        (out * SCALE as i64 / (QA * QB) as i64) as i32
+    }
+}
+
+/// sum over h of clamp(acc[h], 0, QA)^2 * w[h]
+#[inline(always)]
+fn screlu_dot(acc: &[i16; HL], w: &[i16]) -> i64 {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: AVX2 is enabled at compile time (target-cpu=native); slices hold HL values.
+        // clamp(acc)*w fits in i16 because the trainer clips output weights to |w| <= 127.
+        unsafe { screlu_dot_avx2(acc, w) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        screlu_dot_scalar(acc, w)
+    }
+}
+
+fn screlu_dot_scalar(acc: &[i16; HL], w: &[i16]) -> i64 {
+    let mut sum: i64 = 0;
+    for h in 0..HL {
+        let x = acc[h].clamp(0, QA as i16) as i32;
+        sum += (x * x * w[h] as i32) as i64;
+    }
+    sum
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline(always)]
+unsafe fn screlu_dot_avx2(acc: &[i16; HL], w: &[i16]) -> i64 {
+    use std::arch::x86_64::*;
+    debug_assert!(w.len() >= HL);
+    let zero = _mm256_setzero_si256();
+    let qa = _mm256_set1_epi16(QA as i16);
+    let mut sum = _mm256_setzero_si256();
+    let mut i = 0;
+    while i < HL {
+        let a = _mm256_loadu_si256(acc.as_ptr().add(i) as *const __m256i);
+        let ww = _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i);
+        let v = _mm256_min_epi16(_mm256_max_epi16(a, zero), qa);
+        // (v * w) * v: the first product fits in i16, madd widens to i32 pair sums
+        let t = _mm256_mullo_epi16(v, ww);
+        sum = _mm256_add_epi32(sum, _mm256_madd_epi16(t, v));
+        i += 16;
+    }
+    let s = _mm_add_epi32(_mm256_castsi256_si128(sum), _mm256_extracti128_si256(sum, 1));
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
+    _mm_cvtsi128_si32(s) as i64
 }
 
 /// Stand-alone evaluation (full refresh), for tests and the `eval` command.
