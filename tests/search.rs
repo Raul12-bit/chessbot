@@ -41,7 +41,7 @@ fn finds_mate_in_3() {
 
         let mut s = Searcher::new(16, Arc::new(AtomicBool::new(false)));
         s.silent = true;
-        let r = s.search(&b, &[], &Limits { depth: Some(6), ..Default::default() });
+        let r = s.search(&b, &[], &Limits { depth: Some(10), ..Default::default() });
         assert_eq!(r.score, MATE - 5, "{fen}: engine score {}", r.score);
         // the chosen move must keep the forced mate: every reply allows mate in 2
         let nb = b.make_move(r.best);
