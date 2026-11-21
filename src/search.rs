@@ -7,7 +7,7 @@ use crate::eval::{evaluate, SEE_VALUE};
 use crate::movegen::{generate, GEN_ALL, GEN_NOISY};
 use crate::tt::*;
 use crate::types::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,6 +44,20 @@ const F_QS_TT: bool = true;
 const F_SEE_PRUNE: bool = true;
 const F_TT_EVAL: bool = true;
 const F_HIST_PRUNE: bool = false;
+/// Singular extensions (+ multi-cut) for the TT move.
+const F_SE: bool = false;
+/// Correction history: static eval corrected by what searches found for this pawn structure.
+const F_CORR: bool = false;
+const CORR_SIZE: usize = 16384;
+const CORR_GRAIN: i32 = 256;
+const CORR_MAX: i32 = CORR_GRAIN * 32;
+
+#[inline(always)]
+fn pawn_index(b: &Board) -> usize {
+    let w = b.pieces[PAWN] & b.colors[WHITE];
+    let bl = b.pieces[PAWN] & b.colors[BLACK];
+    ((w.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ bl.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)) >> 50) as usize
+}
 
 #[derive(Clone, Copy, Default)]
 struct StackEntry {
@@ -52,6 +66,8 @@ struct StackEntry {
     /// mailbox code (color*6+piece) of the moved piece
     piece: usize,
     static_eval: i32,
+    /// move excluded at this ply (singular extension verification search)
+    excluded: Move,
 }
 
 type ContHist = [[[[i16; 64]; 12]; 64]; 12];
@@ -77,8 +93,16 @@ pub struct SearchResult {
 }
 
 pub struct Searcher {
-    pub tt: TT,
+    pub tt: Arc<TT>,
     pub stop: Arc<AtomicBool>,
+    /// Lazy SMP helper searchers (empty when Threads = 1).
+    helpers: Vec<Searcher>,
+    /// Node count published every 1024 nodes (read by the main thread for `info`).
+    node_counter: Arc<AtomicU64>,
+    /// true for helper threads: no output, no time management, stop only via `stop`.
+    is_helper: bool,
+    /// Node counters of the helpers while they run (taken out of `helpers` during a search).
+    helper_counters: Vec<Arc<AtomicU64>>,
     pub silent: bool,
     pub move_overhead: u64,
     history: Box<[[[i32; 64]; 64]; 2]>,
@@ -98,6 +122,8 @@ pub struct Searcher {
     counter: Box<[[Move; 64]; 12]>,
     cont: Box<ContHist>,
     lmr: Box<[[i32; 64]; 64]>,
+    corr: Box<[[i32; CORR_SIZE]; 2]>,
+    root_depth: i32,
 }
 
 /// Static exchange evaluation: does move `m` win at least `threshold` material?
@@ -211,9 +237,17 @@ fn lmr_table() -> [[i32; 64]; 64] {
 
 impl Searcher {
     pub fn new(hash_mb: usize, stop: Arc<AtomicBool>) -> Searcher {
+        Searcher::with_tt(Arc::new(TT::new(hash_mb)), stop)
+    }
+
+    fn with_tt(tt: Arc<TT>, stop: Arc<AtomicBool>) -> Searcher {
         Searcher {
-            tt: TT::new(hash_mb),
+            tt,
             stop,
+            helpers: Vec::new(),
+            node_counter: Arc::new(AtomicU64::new(0)),
+            is_helper: false,
+            helper_counters: Vec::new(),
             silent: false,
             move_overhead: 30,
             history: Box::new([[[0; 64]; 64]; 2]),
@@ -232,19 +266,69 @@ impl Searcher {
             counter: Box::new([[Move::NULL; 64]; 12]),
             cont: new_cont_hist(),
             lmr: Box::new(lmr_table()),
+            root_depth: 0,
+            corr: vec![[0i32; CORR_SIZE]; 2].into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()),
         }
     }
 
     pub fn clear(&mut self) {
         self.tt.clear();
+        self.clear_tables();
+        for h in self.helpers.iter_mut() {
+            h.clear_tables();
+        }
+    }
+
+    fn clear_tables(&mut self) {
         *self.history = [[[0; 64]; 64]; 2];
         self.killers = [[Move::NULL; 2]; MAX_PLY + 2];
         *self.counter = [[Move::NULL; 64]; 12];
         self.cont = new_cont_hist();
+        for side in self.corr.iter_mut() {
+            side.iter_mut().for_each(|v| *v = 0);
+        }
+    }
+
+    /// Static eval plus the learned correction for this pawn structure.
+    #[inline(always)]
+    fn corrected_eval(&self, b: &Board) -> i32 {
+        let raw = evaluate(b);
+        if !F_CORR {
+            return raw;
+        }
+        (raw + self.corr[b.side][pawn_index(b)] / CORR_GRAIN).clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
     }
 
     pub fn resize_tt(&mut self, mb: usize) {
-        self.tt = TT::new(mb);
+        // drop the old table first so two big tables never coexist
+        self.tt = Arc::new(TT::new(1));
+        for h in self.helpers.iter_mut() {
+            h.tt = self.tt.clone();
+        }
+        self.tt = Arc::new(TT::new(mb));
+        for h in self.helpers.iter_mut() {
+            h.tt = self.tt.clone();
+        }
+    }
+
+    /// Total number of search threads (main + helpers).
+    pub fn threads(&self) -> usize {
+        1 + self.helpers.len()
+    }
+
+    pub fn set_threads(&mut self, n: usize) {
+        let n = n.clamp(1, 256);
+        self.helpers.truncate(n - 1);
+        while self.helpers.len() < n - 1 {
+            let mut h = Searcher::with_tt(self.tt.clone(), self.stop.clone());
+            h.is_helper = true;
+            h.silent = true;
+            self.helpers.push(h);
+        }
+    }
+
+    fn total_nodes(&self) -> u64 {
+        self.nodes + self.helper_counters.iter().map(|c| c.load(Ordering::Relaxed)).sum::<u64>()
     }
 
     fn setup_time(&mut self, b: &Board, limits: &Limits) {
@@ -278,12 +362,14 @@ impl Searcher {
 
     #[inline(always)]
     fn check_stop(&mut self) {
-        if self.nodes & 1023 == 0
-            && (self.stop.load(Ordering::Relaxed)
-                || self.elapsed_ms() >= self.hard_ms
-                || self.nodes >= self.node_limit)
-        {
-            self.stopped = true;
+        if self.nodes & 1023 == 0 {
+            if self.is_helper {
+                self.node_counter.store(self.nodes, Ordering::Relaxed);
+            }
+            if self.stop.load(Ordering::Relaxed) || self.elapsed_ms() >= self.hard_ms || self.nodes >= self.node_limit
+            {
+                self.stopped = true;
+            }
         }
     }
 
@@ -301,15 +387,58 @@ impl Searcher {
     }
 
     /// Run a search. `history` holds hashes of all positions before `root` in the game.
+    /// With helper threads (Lazy SMP) they search the same root in parallel, sharing
+    /// only the transposition table; the main thread alone decides the move and the time.
     pub fn search(&mut self, root: &Board, history: &[u64], limits: &Limits) -> SearchResult {
+        self.tt.new_search();
+        if self.helpers.is_empty() {
+            return self.iterate(root, history, limits);
+        }
+        let mut helpers = std::mem::take(&mut self.helpers);
+        for h in helpers.iter() {
+            h.node_counter.store(0, Ordering::Relaxed);
+        }
+        let helper_limits = Limits { depth: limits.depth, ..Default::default() };
+        // node counts of helpers are visible to `info` through their counters
+        self.helper_counters = helpers.iter().map(|h| h.node_counter.clone()).collect();
+        let res = std::thread::scope(|s| {
+            let mut spawned = 0;
+            for h in helpers.iter_mut() {
+                let hl = &helper_limits;
+                let ok = std::thread::Builder::new()
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn_scoped(s, move || {
+                        h.iterate(root, history, hl);
+                    })
+                    .is_ok();
+                spawned += ok as usize;
+            }
+            let _ = spawned;
+            let r = self.iterate(root, history, limits);
+            // the main thread is done: stop the helpers (scope joins them)
+            self.stop.store(true, Ordering::SeqCst);
+            r
+        });
+        self.helper_counters.clear();
+        self.helpers = helpers;
+        let mut res = res;
+        res.nodes = self.nodes + self.helpers.iter().map(|h| h.nodes).sum::<u64>();
+        res
+    }
+
+    fn iterate(&mut self, root: &Board, history: &[u64], limits: &Limits) -> SearchResult {
         self.start = Instant::now();
         self.nodes = 0;
         self.stopped = false;
-        self.setup_time(root, limits);
+        if self.is_helper {
+            self.soft_ms = u64::MAX;
+            self.hard_ms = u64::MAX;
+        } else {
+            self.setup_time(root, limits);
+        }
         self.node_limit = limits.nodes.unwrap_or(u64::MAX);
         self.hashes.clear();
         self.hashes.extend_from_slice(history);
-        self.tt.new_search();
         self.killers = [[Move::NULL; 2]; MAX_PLY + 2];
         // age history
         for side in self.history.iter_mut() {
@@ -335,6 +464,7 @@ impl Searcher {
 
         for depth in 1..=max_depth {
             self.seldepth = 0;
+            self.root_depth = depth;
             let mut delta = 25;
             let (mut alpha, mut beta) = if depth >= 5 {
                 ((prev_score - delta).max(-INF), (prev_score + delta).min(INF))
@@ -379,8 +509,8 @@ impl Searcher {
                     depth,
                     self.seldepth,
                     format_score(score),
-                    self.nodes,
-                    self.nodes * 1000 / el,
+                    self.total_nodes(),
+                    self.total_nodes() * 1000 / el,
                     self.tt.hashfull(),
                     el,
                     pv.join(" ")
@@ -416,7 +546,7 @@ impl Searcher {
             }
         }
 
-        if limits.infinite {
+        if limits.infinite && !self.is_helper {
             while !self.stop.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -548,12 +678,15 @@ impl Searcher {
         // TT probe
         let mut tt_move = Move::NULL;
         let mut tt_hit: Option<(i32, u8)> = None;
+        let mut tt_depth = -1;
+        let excluded = self.stack[ply].excluded;
         if USE_TT {
             if let Some(e) = self.tt.probe(b.hash) {
                 tt_move = e.mv();
                 let s = score_from_tt(e.score as i32, ply);
                 tt_hit = Some((s, e.bound()));
-                if (if F_PVS { !pv_node } else { !root }) && e.depth as i32 >= depth {
+                tt_depth = e.depth as i32;
+                if excluded.is_null() && (if F_PVS { !pv_node } else { !root }) && e.depth as i32 >= depth {
                     let cut = match e.bound() {
                         BOUND_EXACT => true,
                         BOUND_LOWER => s >= beta,
@@ -567,7 +700,7 @@ impl Searcher {
             }
         }
 
-        let static_eval = if in_check { -INF } else { evaluate(b) };
+        let static_eval = if in_check { -INF } else { self.corrected_eval(b) };
         self.stack[ply].static_eval = static_eval;
         let improving = !in_check && ply >= 2 && static_eval > self.stack[ply - 2].static_eval;
         // TT score as a better estimate than the static eval when its bound agrees
@@ -582,7 +715,7 @@ impl Searcher {
             }
         }
 
-        if !pv_node && !in_check && !root {
+        if !pv_node && !in_check && !root && excluded.is_null() {
             // Reverse futility pruning
             if F_RFP
                 && depth <= 7
@@ -628,6 +761,39 @@ impl Searcher {
         let mut scores = [0i32; 256];
         self.score_moves(b, &list, &mut scores, tt_move, ply);
 
+        // Singular extension: if every move but the TT move fails well below the TT
+        // score, the TT move is forced and gets one more ply. If even without it the
+        // position beats beta, several moves refute the line: cut (multi-cut).
+        let mut se_ext = 0;
+        if F_SE
+            && !root
+            && depth >= 8
+            && excluded.is_null()
+            && !tt_move.is_null()
+            && tt_depth >= depth - 3
+            && (ply as i32) < 2 * self.root_depth
+        {
+            if let Some((tts, bound)) = tt_hit {
+                if tts.abs() < MATE_BOUND && (bound == BOUND_LOWER || bound == BOUND_EXACT) {
+                    let s_beta = tts - 2 * depth;
+                    let saved_eval = self.stack[ply].static_eval;
+                    self.stack[ply].excluded = tt_move;
+                    let s = self.negamax(b, s_beta - 1, s_beta, (depth - 1) / 2, ply);
+                    self.stack[ply].excluded = Move::NULL;
+                    self.stack[ply].static_eval = saved_eval;
+                    self.pv_len[ply] = 0;
+                    if self.stopped {
+                        return 0;
+                    }
+                    if s < s_beta {
+                        se_ext = 1;
+                    } else if s_beta >= beta {
+                        return s_beta;
+                    }
+                }
+            }
+        }
+
         let orig_alpha = alpha;
         let mut best_score = -INF;
         let mut best_move = Move::NULL;
@@ -637,6 +803,9 @@ impl Searcher {
         self.hashes.push(b.hash);
         for i in 0..list.len {
             let m = Self::pick(&mut list, &mut scores, i);
+            if m == excluded {
+                continue;
+            }
             let is_quiet = !m.is_noisy();
             let nb = b.make_move(m);
             let gives_check = nb.in_check();
@@ -670,7 +839,13 @@ impl Searcher {
             self.stack[ply].mv = m;
             self.stack[ply].piece = b.mailbox[m.from()] as usize;
 
-            let extension = if F_CHECK_EXT && gives_check { 1 } else { 0 };
+            let extension = if m == tt_move && se_ext > 0 {
+                se_ext
+            } else if F_CHECK_EXT && gives_check {
+                1
+            } else {
+                0
+            };
             let new_depth = depth - 1 + extension;
 
             let score = if moves_searched == 0 || !F_PVS {
@@ -747,18 +922,35 @@ impl Searcher {
         self.hashes.pop();
 
         if moves_searched == 0 {
+            // only the excluded move was legal (singular search): fail low
+            if !excluded.is_null() {
+                return alpha;
+            }
             // cannot happen with the guards above; kept for safety
             return static_eval.max(alpha);
         }
 
-        if USE_TT {
-            let bound = if best_score >= beta {
-                BOUND_LOWER
-            } else if alpha > orig_alpha {
-                BOUND_EXACT
-            } else {
-                BOUND_UPPER
-            };
+        let bound = if best_score >= beta {
+            BOUND_LOWER
+        } else if alpha > orig_alpha {
+            BOUND_EXACT
+        } else {
+            BOUND_UPPER
+        };
+        if F_CORR
+            && excluded.is_null()
+            && !in_check
+            && (best_move.is_null() || !best_move.is_noisy())
+            && best_score.abs() < MATE_BOUND
+            && !(bound == BOUND_LOWER && best_score <= static_eval)
+            && !(bound == BOUND_UPPER && best_score >= static_eval)
+        {
+            let diff = (best_score - static_eval) * CORR_GRAIN;
+            let weight = (depth + 1).min(16);
+            let e = &mut self.corr[b.side][pawn_index(b)];
+            *e = ((*e * (256 - weight) + diff * weight) / 256).clamp(-CORR_MAX, CORR_MAX);
+        }
+        if USE_TT && excluded.is_null() {
             self.tt.store(b.hash, best_move, score_to_tt(best_score, ply), static_eval, depth, bound);
         }
         best_score
@@ -806,7 +998,7 @@ impl Searcher {
         if in_check {
             best_score = -INF;
         } else {
-            let stand = evaluate(b);
+            let stand = self.corrected_eval(b);
             stand_pat = stand;
             if stand >= beta {
                 return stand;

@@ -1,5 +1,6 @@
 pub mod attacks;
 pub mod board;
+pub mod book;
 pub mod datagen;
 pub mod eval;
 pub mod eval_params;

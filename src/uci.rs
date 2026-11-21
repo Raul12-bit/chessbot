@@ -1,6 +1,7 @@
 //! UCI protocol loop. The search runs in its own thread so `stop` is handled immediately.
 
 use crate::board::{Board, START_FEN};
+use crate::book::Book;
 use crate::movegen;
 use crate::search::{Limits, Searcher};
 use std::io::{self, BufRead, Write};
@@ -18,6 +19,17 @@ struct Uci {
     handle: Option<JoinHandle<Searcher>>,
     stop: Arc<AtomicBool>,
     hash_mb: usize,
+    /// Opening book (GM games); used only for timed `go` commands.
+    book: Option<Book>,
+    own_book: bool,
+    rng: u64,
+}
+
+/// Default book location: `book.bin` next to the executable.
+fn default_book_path() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let p = exe.parent()?.join("book.bin");
+    p.exists().then(|| p.to_string_lossy().into_owned())
 }
 
 impl Uci {
@@ -30,7 +42,21 @@ impl Uci {
             handle: None,
             stop,
             hash_mb: 16,
+            book: default_book_path().and_then(|p| Book::load(&p).ok()),
+            own_book: true,
+            rng: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E37_79B9_7F4A_7C15)
+                | 1,
         }
+    }
+
+    fn next_rand(&mut self) -> u64 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        self.rng
     }
 
     /// Wait for a running search to finish and take the searcher back.
@@ -126,6 +152,16 @@ impl Uci {
             i += 1;
         }
         self.join();
+        // Book move: only in timed games, never for analysis / fixed depth / nodes.
+        let timed = limits.wtime.is_some() || limits.btime.is_some() || limits.movetime.is_some();
+        if self.own_book && timed && !limits.infinite && limits.depth.is_none() && limits.nodes.is_none() {
+            let r = self.next_rand();
+            if let Some(m) = self.book.as_ref().and_then(|bk| bk.pick(&self.board, r)) {
+                println!("info string book move");
+                println!("bestmove {}", m.to_uci());
+                return;
+            }
+        }
         let mut searcher = match self.searcher.take() {
             Some(s) => s,
             None => Searcher::new(self.hash_mb, self.stop.clone()),
@@ -169,7 +205,27 @@ impl Uci {
                     self.searcher().move_overhead = v.min(5000);
                 }
             }
-            "threads" | "ponder" => {}
+            "threads" => {
+                if let Ok(n) = value.trim().parse::<usize>() {
+                    self.searcher().set_threads(n.clamp(1, 64));
+                }
+            }
+            "ownbook" => self.own_book = value.trim().eq_ignore_ascii_case("true"),
+            "bookfile" => {
+                let v = value.trim();
+                if v.is_empty() || v == "<empty>" {
+                    self.book = None;
+                } else {
+                    match Book::load(v) {
+                        Ok(b) => {
+                            println!("info string book loaded: {} moves", b.len());
+                            self.book = Some(b);
+                        }
+                        Err(e) => println!("info string book not loaded: {e}"),
+                    }
+                }
+            }
+            "ponder" => {}
             _ => println!("info string unknown option {name}"),
         }
     }
@@ -190,8 +246,10 @@ pub fn run() {
                 println!("id name {ENGINE_NAME} {ENGINE_VERSION}");
                 println!("id author chessbot developers");
                 println!("option name Hash type spin default 16 min 1 max 65536");
-                println!("option name Threads type spin default 1 min 1 max 1");
+                println!("option name Threads type spin default 1 min 1 max 64");
                 println!("option name Move Overhead type spin default 30 min 0 max 5000");
+                println!("option name OwnBook type check default true");
+                println!("option name BookFile type string default <empty>");
                 println!("uciok");
             }
             "isready" => println!("readyok"),

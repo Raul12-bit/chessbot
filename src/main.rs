@@ -67,6 +67,32 @@ fn main() {
             let threads = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(10);
             chessbot::tune::run(data, out, epochs, limit, threads);
         }
+        Some("book") => {
+            // book <out.bin> <max_ply> <min_elo> <min_count> <min_score_pct> <featured> <featured_mul> <pgn...>
+            let a = |i: usize, d: &str| args.get(i).cloned().unwrap_or_else(|| d.to_string());
+            let params = chessbot::book::BuildParams {
+                max_ply: a(3, "20").parse().unwrap_or(20),
+                min_elo: a(4, "2400").parse().unwrap_or(2400),
+                min_count: a(5, "3").parse().unwrap_or(3),
+                min_score_pct: a(6, "30").parse().unwrap_or(30),
+                featured: a(7, ""),
+                featured_mul: a(8, "1").parse().unwrap_or(1),
+            };
+            let pgns: Vec<String> = args.iter().skip(9).cloned().collect();
+            if let Err(e) = chessbot::book::build(&a(2, "book.bin"), &pgns, &params) {
+                eprintln!("book: {e}");
+            }
+        }
+        Some("gmdata") => {
+            // gmdata <out.txt> <min_elo> <skip_plies> <pgn...>
+            let out = args.get(2).cloned().unwrap_or_else(|| "data/gm.txt".to_string());
+            let min_elo = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(2500);
+            let skip = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(16);
+            let pgns: Vec<String> = args.iter().skip(5).cloned().collect();
+            if let Err(e) = chessbot::book::extract_positions(&out, &pgns, min_elo, skip) {
+                eprintln!("gmdata: {e}");
+            }
+        }
         Some("evalbench") => {
             // evalbench <data.txt>: compare speed and values of PeSTO vs tunable eval
             let path = args.get(2).map(|s| s.as_str()).unwrap_or("data/selfplay1.txt");
