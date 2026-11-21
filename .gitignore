@@ -11,3 +11,4 @@ NIGHT_UNTIL
 DONE
 /logs/
 config.json
+/nets/train/

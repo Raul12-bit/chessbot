@@ -159,3 +159,160 @@ pub fn run(book: &str, out: &str, games: u64, threads: usize, nodes: u64) {
     }
     eprintln!("done: {} positions in {:.0}s", positions.load(Ordering::Relaxed), t0.elapsed().as_secs_f64());
 }
+
+/// Starting position for NNUE data generation: a book line, a position from a GM game,
+/// or 8-9 random plies from the initial position (mixed for diversity).
+fn pick_start(book: &[String], gm: &[String], rng: &mut Rng) -> Option<Board> {
+    match rng.next() % 3 {
+        0 if !book.is_empty() => {
+            let line = &book[(rng.next() % book.len() as u64) as usize];
+            let fen: String = line.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+            Board::from_fen(&fen).ok()
+        }
+        1 if !gm.is_empty() => {
+            let line = &gm[(rng.next() % gm.len() as u64) as usize];
+            Board::from_fen(line.split('|').next()?.trim()).ok()
+        }
+        _ => {
+            let mut b = Board::startpos();
+            let plies = 8 + rng.next() % 2;
+            for _ in 0..plies {
+                let mut list = MoveList::new();
+                generate_all(&b, &mut list);
+                if list.len == 0 {
+                    return None;
+                }
+                b = b.make_move(list.moves[(rng.next() % list.len as u64) as usize]);
+            }
+            Some(b)
+        }
+    }
+}
+
+/// Self-play for NNUE training. Writes `FEN | score | result`, score in centipawns from
+/// White's point of view (search score at the node budget), result 1.0 / 0.5 / 0.0 for White.
+/// Positions in check, with a noisy best move or a mate score are skipped.
+pub fn run_nnue(book_path: &str, gm_path: &str, out: &str, games: u64, threads: usize, nodes: u64) {
+    let read_lines = |p: &str, step: usize| -> Vec<String> {
+        File::open(p)
+            .map(|f| {
+                BufReader::new(f)
+                    .lines()
+                    .map_while(Result::ok)
+                    .filter(|l| !l.trim().is_empty())
+                    .step_by(step)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let book = Arc::new(read_lines(book_path, 1));
+    let gm = Arc::new(read_lines(gm_path, 7));
+    eprintln!("openings: book {} lines, gm {} positions", book.len(), gm.len());
+    let writer = match std::fs::OpenOptions::new().create(true).append(true).open(out) {
+        Ok(f) => Arc::new(Mutex::new(BufWriter::new(f))),
+        Err(e) => {
+            eprintln!("cannot open {out}: {e}");
+            return;
+        }
+    };
+    let done = Arc::new(AtomicU64::new(0));
+    let positions = Arc::new(AtomicU64::new(0));
+    let t0 = Instant::now();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1);
+    let mut handles = Vec::new();
+    for tid in 0..threads {
+        let (book, gm, writer, done, positions) =
+            (book.clone(), gm.clone(), writer.clone(), done.clone(), positions.clone());
+        handles.push(std::thread::spawn(move || {
+            let mut rng = Rng((seed ^ ((tid as u64 + 1) * 0x9E37_79B9_7F4A_7C15)) | 1);
+            let mut searcher = Searcher::new(8, Arc::new(AtomicBool::new(false)));
+            searcher.silent = true;
+            loop {
+                let g = done.fetch_add(1, Ordering::SeqCst);
+                if g >= games {
+                    break;
+                }
+                let Some(start) = pick_start(&book, &gm, &mut rng) else { continue };
+                // skip clearly decided starting positions
+                searcher.clear();
+                let probe = searcher.search(&start, &[], &Limits { nodes: Some(2000), depth: Some(64), ..Default::default() });
+                if probe.best.is_null() || probe.score.abs() > 400 {
+                    continue;
+                }
+                let (recs, result) = play_game_scored(&mut searcher, start, nodes, &mut rng);
+                positions.fetch_add(recs.len() as u64, Ordering::Relaxed);
+                if let Ok(mut w) = writer.lock() {
+                    for (f, s) in recs {
+                        let _ = writeln!(w, "{f} | {s} | {result:.1}");
+                    }
+                }
+                if g % 1000 == 0 {
+                    eprintln!(
+                        "games {g} positions {} elapsed {:.0}s",
+                        positions.load(Ordering::Relaxed),
+                        t0.elapsed().as_secs_f64()
+                    );
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    if let Ok(mut w) = writer.lock() {
+        let _ = w.flush();
+    }
+    eprintln!("done: {} positions in {:.0}s", positions.load(Ordering::Relaxed), t0.elapsed().as_secs_f64());
+}
+
+fn play_game_scored(searcher: &mut Searcher, start: Board, nodes: u64, rng: &mut Rng) -> (Vec<(String, i32)>, f32) {
+    let mut b = start;
+    let mut history: Vec<u64> = Vec::new();
+    let mut recs = Vec::new();
+    let (mut win_streak, mut draw_streak, mut plies) = (0, 0, 0);
+    searcher.clear();
+    let result: f32 = loop {
+        let mut list = MoveList::new();
+        generate_all(&b, &mut list);
+        if list.len == 0 {
+            break if b.in_check() {
+                if b.side == WHITE { 0.0 } else { 1.0 }
+            } else {
+                0.5
+            };
+        }
+        if b.halfmove >= 100 || b.insufficient_material() || history.iter().filter(|&&h| h == b.hash).count() >= 2 {
+            break 0.5;
+        }
+        if plies > 400 {
+            break 0.5;
+        }
+        let n = nodes + rng.next() % (nodes / 4 + 1);
+        let res = searcher.search(&b, &history, &Limits { nodes: Some(n), depth: Some(64), ..Default::default() });
+        if res.best.is_null() {
+            break 0.5;
+        }
+        let score_white = if b.side == WHITE { res.score } else { -res.score };
+        win_streak = if res.score.abs() >= 2000 { win_streak + 1 } else { 0 };
+        if win_streak >= 4 {
+            break if score_white > 0 { 1.0 } else { 0.0 };
+        }
+        draw_streak = if res.score.abs() <= 8 && plies > 80 { draw_streak + 1 } else { 0 };
+        if draw_streak >= 12 {
+            break 0.5;
+        }
+        if !b.in_check() && !res.best.is_noisy() && res.score.abs() < MATE_BOUND {
+            recs.push((b.to_fen(), score_white));
+        }
+        history.push(b.hash);
+        b = b.make_move(res.best);
+        plies += 1;
+        if b.halfmove == 0 {
+            history.clear();
+        }
+    };
+    (recs, result)
+}

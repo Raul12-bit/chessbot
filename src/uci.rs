@@ -232,6 +232,15 @@ impl Uci {
                 }
             }
             "ownbook" => self.own_book = value.trim().eq_ignore_ascii_case("true"),
+            "evalfile" => {
+                let v = value.trim();
+                if !v.is_empty() && v != "<default>" {
+                    match crate::nnue::load_net(v) {
+                        Ok(()) => println!("info string network loaded: {v}"),
+                        Err(e) => println!("info string network not loaded: {e}"),
+                    }
+                }
+            }
             "bookfile" => {
                 let v = value.trim();
                 if v.is_empty() || v == "<empty>" {
@@ -272,6 +281,7 @@ pub fn run() {
                 println!("option name Ponder type check default false");
                 println!("option name OwnBook type check default true");
                 println!("option name BookFile type string default <empty>");
+                println!("option name EvalFile type string default <default>");
                 println!("uciok");
             }
             "isready" => println!("readyok"),

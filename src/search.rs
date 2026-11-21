@@ -50,6 +50,8 @@ const F_SE: bool = true;
 const F_CAPHIST: bool = false;
 /// Correction history: static eval corrected by what searches found for this pawn structure.
 const F_CORR: bool = true;
+/// NNUE evaluation instead of the hand-crafted one.
+const F_NNUE: bool = false;
 const CORR_SIZE: usize = 16384;
 const CORR_GRAIN: i32 = 256;
 const CORR_MAX: i32 = CORR_GRAIN * 32;
@@ -132,6 +134,8 @@ pub struct Searcher {
     lmr: Box<[[i32; 64]; 64]>,
     corr: Box<[[i32; CORR_SIZE]; 2]>,
     cap_hist: Box<[[[i32; 6]; 64]; 12]>,
+    /// NNUE accumulators by ply
+    acc: Vec<crate::nnue::Accumulator>,
     root_depth: i32,
 }
 
@@ -278,6 +282,7 @@ impl Searcher {
             lmr: Box::new(lmr_table()),
             root_depth: 0,
             cap_hist: Box::new([[[0; 6]; 64]; 12]),
+            acc: vec![crate::nnue::Accumulator::default(); MAX_PLY + 4],
             corr: vec![[0i32; CORR_SIZE]; 2].into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()),
         }
     }
@@ -301,10 +306,29 @@ impl Searcher {
         }
     }
 
+    /// Static evaluation of `b`, the position at `ply` (NNUE uses the accumulator of that ply).
+    #[inline(always)]
+    fn raw_eval(&self, b: &Board, ply: usize) -> i32 {
+        if F_NNUE {
+            self.acc[ply].evaluate(b.side).clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
+        } else {
+            evaluate(b)
+        }
+    }
+
+    /// Accumulator of the child position at `ply + 1` from the one at `ply`.
+    #[inline(always)]
+    fn push_acc(&mut self, parent: &Board, child: &Board, ply: usize) {
+        if F_NNUE {
+            let (lo, hi) = self.acc.split_at_mut(ply + 1);
+            hi[0].update_from(&lo[ply], parent, child);
+        }
+    }
+
     /// Static eval plus the learned correction for this pawn structure.
     #[inline(always)]
-    fn corrected_eval(&self, b: &Board) -> i32 {
-        let raw = evaluate(b);
+    fn corrected_eval(&self, b: &Board, ply: usize) -> i32 {
+        let raw = self.raw_eval(b, ply);
         if !F_CORR {
             return raw;
         }
@@ -451,6 +475,9 @@ impl Searcher {
             self.setup_time(root, limits);
         }
         self.node_limit = limits.nodes.unwrap_or(u64::MAX);
+        if F_NNUE {
+            self.acc[0].refresh(root);
+        }
         self.hashes.clear();
         self.hashes.extend_from_slice(history);
         self.killers = [[Move::NULL; 2]; MAX_PLY + 2];
@@ -708,7 +735,7 @@ impl Searcher {
                 return 0;
             }
             if ply >= MAX_PLY - 1 {
-                return if in_check { 0 } else { evaluate(b) };
+                return if in_check { 0 } else { self.raw_eval(b, ply) };
             }
         }
 
@@ -737,7 +764,7 @@ impl Searcher {
             }
         }
 
-        let static_eval = if in_check { -INF } else { self.corrected_eval(b) };
+        let static_eval = if in_check { -INF } else { self.corrected_eval(b, ply) };
         self.stack[ply].static_eval = static_eval;
         let improving = !in_check && ply >= 2 && static_eval > self.stack[ply - 2].static_eval;
         // TT score as a better estimate than the static eval when its bound agrees
@@ -774,6 +801,7 @@ impl Searcher {
                 self.stack[ply].mv = Move::NULL;
                 self.stack[ply].piece = 0;
                 self.hashes.push(b.hash);
+                self.push_acc(b, &nb, ply);
                 let score = -self.negamax(&nb, -beta, -beta + 1, depth - r, ply + 1);
                 self.hashes.pop();
                 if self.stopped {
@@ -876,6 +904,7 @@ impl Searcher {
 
             self.stack[ply].mv = m;
             self.stack[ply].piece = b.mailbox[m.from()] as usize;
+            self.push_acc(b, &nb, ply);
 
             let extension = if m == tt_move && se_ext > 0 {
                 se_ext
@@ -1020,7 +1049,7 @@ impl Searcher {
         }
         let in_check = b.in_check();
         if ply >= MAX_PLY - 1 {
-            return if in_check { 0 } else { evaluate(b) };
+            return if in_check { 0 } else { self.raw_eval(b, ply) };
         }
 
         let mut tt_move = Move::NULL;
@@ -1047,7 +1076,7 @@ impl Searcher {
         if in_check {
             best_score = -INF;
         } else {
-            let stand = self.corrected_eval(b);
+            let stand = self.corrected_eval(b, ply);
             stand_pat = stand;
             if stand >= beta {
                 return stand;
@@ -1073,6 +1102,7 @@ impl Searcher {
                 break;
             }
             let nb = b.make_move(m);
+            self.push_acc(b, &nb, ply);
             let score = -self.qsearch(&nb, -beta, -alpha, ply + 1);
             if self.stopped {
                 return 0;

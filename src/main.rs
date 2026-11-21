@@ -47,6 +47,12 @@ fn main() {
         }
         Some("bench") => {
             let depth = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
+            if let Some(net) = args.get(3) {
+                if let Err(e) = chessbot::nnue::load_net(net) {
+                    eprintln!("{e}");
+                    return;
+                }
+            }
             bench(depth);
         }
         Some("datagen") => {
@@ -57,6 +63,57 @@ fn main() {
             let threads = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(10);
             let nodes = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(5000);
             chessbot::datagen::run(book, out, games, threads, nodes);
+        }
+        Some("datagen2") => {
+            // datagen2 <book.epd> <gm.txt> <out.txt> <games> <threads> <nodes>: NNUE data (FEN | score | result)
+            let a = |i: usize, d: &str| args.get(i).cloned().unwrap_or_else(|| d.to_string());
+            chessbot::datagen::run_nnue(
+                &a(2, "tests/books/uho_20k.epd"),
+                &a(3, "data/gm.txt"),
+                &a(4, "data/nnue/selfplay.txt"),
+                a(5, "1000000").parse().unwrap_or(1_000_000),
+                a(6, "11").parse().unwrap_or(11),
+                a(7, "5000").parse().unwrap_or(5000),
+            );
+        }
+        Some("nnue-pack") => {
+            // nnue-pack <out.bin> <max_abs_score> <in.txt...>
+            let out = args.get(2).cloned().unwrap_or_else(|| "data/nnue/train.bin".to_string());
+            let max_score = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3000);
+            let inputs: Vec<String> = args.iter().skip(4).cloned().collect();
+            if let Err(e) = chessbot::nnue_train::pack(&inputs, &out, max_score) {
+                eprintln!("nnue-pack: {e}");
+            }
+        }
+        Some("nnue-train") => {
+            // nnue-train <data.bin> <out_prefix> <epochs> <threads> <lr> <wdl> [max_positions] [init.f32]
+            let a = |i: usize, d: &str| args.get(i).cloned().unwrap_or_else(|| d.to_string());
+            let tp = chessbot::nnue_train::TrainParams {
+                epochs: a(4, "20").parse().unwrap_or(20),
+                threads: a(5, "11").parse().unwrap_or(11),
+                lr: a(6, "0.001").parse().unwrap_or(0.001),
+                wdl: a(7, "0.3").parse().unwrap_or(0.3),
+                batch: 16384,
+                limit: a(8, "1000000000").parse().unwrap_or(usize::MAX),
+                init: args.get(9).cloned(),
+            };
+            if let Err(e) = chessbot::nnue_train::train(&a(2, "data/nnue/train.bin"), &a(3, "nets/train/net"), &tp) {
+                eprintln!("nnue-train: {e}");
+            }
+        }
+        Some("nnue-eval") => {
+            // nnue-eval <net.nnue> <fen...>: quantized NNUE eval vs hand-crafted eval
+            if let Some(path) = args.get(2) {
+                if let Err(e) = chessbot::nnue::load_net(path) {
+                    eprintln!("{e}");
+                    return;
+                }
+            }
+            let fen = if args.len() > 3 { args[3..].join(" ") } else { chessbot::board::START_FEN.to_string() };
+            match Board::from_fen(&fen) {
+                Ok(b) => println!("nnue {} hce {}", chessbot::nnue::evaluate(&b), chessbot::eval::evaluate(&b)),
+                Err(e) => eprintln!("{e}"),
+            }
         }
         Some("tune") => {
             // tune <data.txt> <out.rs> <epochs> <max_positions> <threads>

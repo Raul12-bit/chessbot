@@ -6,6 +6,8 @@ pub mod eval;
 pub mod eval_params;
 pub mod evalt;
 pub mod movegen;
+pub mod nnue;
+pub mod nnue_train;
 pub mod search;
 pub mod tt;
 pub mod tune;
