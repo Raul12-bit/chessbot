@@ -53,7 +53,7 @@ const F_RAZOR: bool = false;
 /// Singular extensions (+ multi-cut) for the TT move.
 const F_SE: bool = true;
 /// Capture history in the ordering of captures (instead of plain MVV-LVA).
-const F_CAPHIST: bool = false;
+const F_CAPHIST: bool = true;
 /// Correction history: static eval corrected by what searches found for this pawn structure.
 const F_CORR: bool = true;
 /// NNUE evaluation instead of the hand-crafted one.
