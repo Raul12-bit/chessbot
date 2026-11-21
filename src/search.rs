@@ -30,7 +30,7 @@ const F_QS_SEE: bool = true;
 const F_IIR: bool = false;
 const F_CONT: bool = false;
 // Extra features beyond the phase-4 list (also SPRT-gated).
-const F_QS_TT: bool = false;
+const F_QS_TT: bool = true;
 const F_SEE_PRUNE: bool = false;
 
 #[derive(Clone, Copy, Default)]

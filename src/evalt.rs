@@ -24,7 +24,14 @@ pub const I_ROOK_SEMI: usize = 468;
 pub const I_KATT: usize = 469; // 4: knight, bishop, rook, queen attacks on the enemy king zone
 pub const I_SHIELD: usize = 473; // 2: pawns 1 and 2 ranks in front of the king
 pub const I_TEMPO: usize = 475;
-pub const N_PARAMS: usize = 476;
+pub const I_THREAT_PAWN: usize = 476; // our pawns attack enemy pieces
+pub const I_THREAT_MINOR: usize = 477; // our minors attack enemy rooks/queens
+pub const I_PASSED_OWN_KDIST: usize = 478; // distance of own king to the passer's stop square
+pub const I_PASSED_ENEMY_KDIST: usize = 479; // distance of enemy king to the stop square
+pub const I_PASSED_FREE: usize = 480; // 8: passer with empty stop square, by relative rank
+pub const I_OUTPOST: usize = 488; // knight on pawn-protected square no enemy pawn can attack
+pub const I_KING_OPEN: usize = 489; // files at/next to own king without own pawns
+pub const N_PARAMS: usize = 490;
 
 pub const PHASE_INC: [i32; 6] = [0, 1, 1, 2, 4, 0];
 
@@ -71,6 +78,29 @@ const fn adjacent_files() -> [Bitboard; 8] {
     t
 }
 static ADJ_FILES: [Bitboard; 8] = adjacent_files();
+
+#[inline(always)]
+fn dist(a: usize, b: usize) -> i32 {
+    let dr = (rank_of(a) as i32 - rank_of(b) as i32).abs();
+    let df = (file_of(a) as i32 - file_of(b) as i32).abs();
+    dr.max(df)
+}
+
+/// Squares that pawns of `color` can ever attack (attack span of their forward fill).
+#[inline(always)]
+fn pawn_attack_span(pawns: Bitboard, color: usize) -> Bitboard {
+    let mut f = pawns;
+    if color == WHITE {
+        f |= f << 8;
+        f |= f << 16;
+        f |= f << 32;
+    } else {
+        f |= f >> 8;
+        f |= f >> 16;
+        f |= f >> 32;
+    }
+    pawn_attacks_bb(f, color)
+}
 
 #[inline(always)]
 pub fn pawn_attacks_bb(pawns: Bitboard, color: usize) -> Bitboard {
@@ -128,13 +158,22 @@ pub fn eval_impl<const TRACE: bool>(b: &Board, tr: &mut [i16]) -> (i32, i32, i32
         }
 
         // pieces: mobility, king-zone attacks, rook files
+        let mut minor_att = 0u64;
+        let enemy_span = pawn_attack_span(pawns[them], them);
+        let outpost_ranks = if c == WHITE { RANK_1 << 24 | RANK_1 << 32 | RANK_1 << 40 } else { RANK_1 << 16 | RANK_1 << 24 | RANK_1 << 32 };
+        let outposts = b.pieces_of(c, KNIGHT) & pawn_att[c] & outpost_ranks & !enemy_span;
+        if outposts != 0 {
+            feat!(I_OUTPOST, popcnt(outposts), sign);
+        }
         for sq in bits(b.pieces_of(c, KNIGHT)) {
             let a = KNIGHT_ATTACKS[sq];
+            minor_att |= a;
             feat!(I_MOB_N + popcnt(a & mob_area) as usize, 1, sign);
             feat!(I_KATT, popcnt(a & enemy_kzone), sign);
         }
         for sq in bits(b.pieces_of(c, BISHOP)) {
             let a = bishop_attacks(sq, occ);
+            minor_att |= a;
             feat!(I_MOB_B + popcnt(a & mob_area) as usize, 1, sign);
             feat!(I_KATT + 1, popcnt(a & enemy_kzone), sign);
         }
@@ -158,6 +197,17 @@ pub fn eval_impl<const TRACE: bool>(b: &Board, tr: &mut [i16]) -> (i32, i32, i32
             feat!(I_BPAIR, 1, sign);
         }
 
+        // threats
+        let enemy_nonpawn = b.colors[them] & !b.pieces[PAWN] & !b.pieces[KING];
+        let t = popcnt(pawn_att[c] & enemy_nonpawn);
+        if t != 0 {
+            feat!(I_THREAT_PAWN, t, sign);
+        }
+        let t = popcnt(minor_att & b.colors[them] & (b.pieces[ROOK] | b.pieces[QUEEN]));
+        if t != 0 {
+            feat!(I_THREAT_MINOR, t, sign);
+        }
+
         // pawn structure
         // doubled: pawns beyond the first on each file = pawns - occupied files
         {
@@ -177,6 +227,12 @@ pub fn eval_impl<const TRACE: bool>(b: &Board, tr: &mut [i16]) -> (i32, i32, i32
             if pawns[them] & PASSED_MASK[c][sq] == 0 {
                 let rel_rank = if c == WHITE { rank_of(sq) } else { 7 - rank_of(sq) };
                 feat!(I_PASSED + rel_rank, 1, sign);
+                let stop = if c == WHITE { sq + 8 } else { sq - 8 };
+                feat!(I_PASSED_OWN_KDIST, dist(king_sq[c], stop), sign);
+                feat!(I_PASSED_ENEMY_KDIST, dist(king_sq[them], stop), sign);
+                if occ & bit(stop) == 0 {
+                    feat!(I_PASSED_FREE + rel_rank, 1, sign);
+                }
             }
         }
 
@@ -191,6 +247,17 @@ pub fn eval_impl<const TRACE: bool>(b: &Board, tr: &mut [i16]) -> (i32, i32, i32
             let far = popcnt(pawns[c] & files & (RANK_1 << (8 * r2)));
             feat!(I_SHIELD, near, sign);
             feat!(I_SHIELD + 1, far, sign);
+        }
+        // open files around the king
+        let kf = file_of(ks);
+        let mut open = 0;
+        for f in kf.saturating_sub(1)..=(kf + 1).min(7) {
+            if pawns[c] & (FILE_A << f) == 0 {
+                open += 1;
+            }
+        }
+        if open != 0 {
+            feat!(I_KING_OPEN, open, sign);
         }
         let _ = own;
     }
