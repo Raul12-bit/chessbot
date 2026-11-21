@@ -16,10 +16,12 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::time::Instant;
 
 pub const RECORD: usize = 28;
+const _: () = assert!(std::mem::size_of::<Packed>() == RECORD);
 
 #[derive(Clone, Copy)]
 pub struct Packed {
-    pub occ: u64,
+    /// occupancy bitboard, little endian bytes (keeps the struct at 28 bytes, alignment 2)
+    pub occ_le: [u8; 8],
     pub pcs: [u8; 16],
     pub score: i16,
     /// 0 loss, 1 draw, 2 win for the side to move
@@ -28,9 +30,14 @@ pub struct Packed {
 }
 
 impl Packed {
+    #[inline(always)]
+    pub fn occ(&self) -> u64 {
+        u64::from_le_bytes(self.occ_le)
+    }
+
     fn to_bytes(self) -> [u8; RECORD] {
         let mut b = [0u8; RECORD];
-        b[..8].copy_from_slice(&self.occ.to_le_bytes());
+        b[..8].copy_from_slice(&self.occ_le);
         b[8..24].copy_from_slice(&self.pcs);
         b[24..26].copy_from_slice(&self.score.to_le_bytes());
         b[26] = self.result;
@@ -41,7 +48,7 @@ impl Packed {
         let mut pcs = [0u8; 16];
         pcs.copy_from_slice(&b[8..24]);
         Packed {
-            occ: u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+            occ_le: [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]],
             pcs,
             score: i16::from_le_bytes([b[24], b[25]]),
             result: b[26],
@@ -53,7 +60,7 @@ impl Packed {
     #[inline(always)]
     fn features(&self, us: &mut [u16; 32], them: &mut [u16; 32]) -> usize {
         let stm = self.stm as usize;
-        let mut occ = self.occ;
+        let mut occ = self.occ();
         let mut i = 0;
         while occ != 0 && i < 32 {
             let sq = occ.trailing_zeros() as usize;
@@ -71,7 +78,7 @@ impl Packed {
     /// Board with the same pieces and side to move (no castling / en passant rights).
     pub fn to_board(&self) -> Option<Board> {
         let mut grid = [12u8; 64];
-        let mut occ = self.occ;
+        let mut occ = self.occ();
         let mut i = 0;
         while occ != 0 && i < 32 {
             let sq = occ.trailing_zeros() as usize;
@@ -136,14 +143,14 @@ fn parse_line(line: &str) -> Option<Packed> {
     let res_white = (result * 2.0).round() as i32; // 0, 1, 2
     let res_stm = if white { res_white } else { 2 - res_white };
     let mut p = Packed {
-        occ: b.occ(),
+        occ_le: b.occ().to_le_bytes(),
         pcs: [0; 16],
         score: score_stm.clamp(-32000, 32000) as i16,
         result: res_stm.clamp(0, 2) as u8,
         stm: b.side as u8,
     };
     let mut i = 0;
-    for sq in bits(p.occ) {
+    for sq in bits(p.occ()) {
         if i >= 32 {
             return None;
         }
