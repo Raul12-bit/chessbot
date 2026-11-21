@@ -31,7 +31,7 @@ const F_IIR: bool = false;
 const F_CONT: bool = false;
 // Extra features beyond the phase-4 list (also SPRT-gated).
 const F_QS_TT: bool = true;
-const F_SEE_PRUNE: bool = false;
+const F_SEE_PRUNE: bool = true;
 
 #[derive(Clone, Copy, Default)]
 struct StackEntry {
