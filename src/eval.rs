@@ -126,7 +126,7 @@ const EG_TABLE: [[i32; 64]; 6] = [
 ];
 
 /// Phase 5: switch from plain PeSTO to the tunable evaluation in `evalt.rs`.
-const USE_TUNABLE: bool = false;
+const USE_TUNABLE: bool = true;
 
 /// Evaluate from the side to move's perspective (centipawns).
 #[inline]
