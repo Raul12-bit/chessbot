@@ -19,6 +19,16 @@ const USE_TT: bool = !cfg!(feature = "weak");
 const USE_ORDERING: bool = !cfg!(feature = "weak");
 
 // Phase-4 search features. Each one is switched on only after passing its own SPRT test.
+// Time management (sudden death / increment).
+/// Assumed number of moves left when the GUI does not send `movestogo`.
+const TM_MOVES_TO_GO: u64 = 25;
+/// Hard limit as a multiple of the base allocation (also capped at 1/4 of the clock).
+const TM_HARD_MUL: u64 = 3;
+/// Do not start a new iteration after this share (%) of the base allocation...
+const TM_SOFT_PCT: u64 = 60;
+/// ...scaled (%) by how many iterations in a row the best move stayed the same.
+const TM_STABILITY_PCT: [u64; 6] = [140, 100, 75, 60, 50, 45];
+
 const F_PVS: bool = true;
 const F_NMP: bool = true;
 const F_LMR: bool = true;
@@ -253,9 +263,9 @@ impl Searcher {
         };
         if let Some(time) = time {
             let avail = time.saturating_sub(self.move_overhead).max(1);
-            let mtg = limits.movestogo.unwrap_or(25).clamp(1, 50);
+            let mtg = limits.movestogo.unwrap_or(TM_MOVES_TO_GO).clamp(1, 50);
             let base = avail / mtg + inc * 3 / 4;
-            let hard = (base * 3).min(avail * 2 / 5).max(1);
+            let hard = (base * TM_HARD_MUL).min(avail / 4).max(1);
             self.soft_ms = base.min(hard);
             self.hard_ms = hard;
         }
@@ -319,6 +329,9 @@ impl Searcher {
         let mut best_score = 0;
         let mut completed_depth = 0;
         let mut prev_score = 0;
+        let mut iter_score = 0;
+        let mut stable_move = Move::NULL;
+        let mut stable_iters = 0usize;
 
         for depth in 1..=max_depth {
             self.seldepth = 0;
@@ -373,9 +386,28 @@ impl Searcher {
                     pv.join(" ")
                 );
             }
-            if self.elapsed_ms() >= self.soft_ms * 6 / 10 && limits.movetime.is_none() {
-                break;
+            if limits.movetime.is_none() && self.soft_ms != u64::MAX {
+                // Only one legal move: nothing to think about.
+                if list.len == 1 {
+                    break;
+                }
+                // Best-move stability: think less when the best move keeps
+                // repeating across iterations, more when it keeps changing or
+                // the score is falling.
+                if best == stable_move {
+                    stable_iters += 1;
+                } else {
+                    stable_move = best;
+                    stable_iters = 0;
+                }
+                let stab_pct = TM_STABILITY_PCT[stable_iters.min(TM_STABILITY_PCT.len() - 1)];
+                let drop_pct = if depth > 1 && score < iter_score - 30 { 130 } else { 100 };
+                let cutoff = self.soft_ms * TM_SOFT_PCT / 100 * stab_pct / 100 * drop_pct / 100;
+                if self.elapsed_ms() >= cutoff {
+                    break;
+                }
             }
+            iter_score = score;
             if score.abs() >= MATE_BOUND && limits.depth.is_none() && !limits.infinite {
                 // forced mate found and confirmed at this depth
                 if depth as i32 > (MATE - score.abs()) + 2 {
