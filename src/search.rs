@@ -45,7 +45,7 @@ const F_SEE_PRUNE: bool = true;
 const F_TT_EVAL: bool = true;
 const F_HIST_PRUNE: bool = false;
 /// Singular extensions (+ multi-cut) for the TT move.
-const F_SE: bool = false;
+const F_SE: bool = true;
 /// Capture history in the ordering of captures (instead of plain MVV-LVA).
 const F_CAPHIST: bool = false;
 /// Correction history: static eval corrected by what searches found for this pawn structure.
