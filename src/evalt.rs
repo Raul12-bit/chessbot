@@ -115,11 +115,15 @@ pub fn eval_impl<const TRACE: bool>(b: &Board, tr: &mut [i16]) -> (i32, i32, i32
 
         // material + PST
         for piece in 0..6 {
-            for sq in bits(b.pieces_of(c, piece)) {
-                let rel = if c == WHITE { sq } else { sq ^ 56 };
-                feat!(I_MAT + piece, 1, sign);
-                feat!(I_PST + piece * 64 + rel, 1, sign);
-                phase += PHASE_INC[piece];
+            let bb = b.pieces_of(c, piece);
+            let n = popcnt(bb);
+            if n != 0 {
+                feat!(I_MAT + piece, n, sign);
+                phase += PHASE_INC[piece] * n as i32;
+            }
+            let flip = if c == WHITE { 0 } else { 56 };
+            for sq in bits(bb) {
+                feat!(I_PST + piece * 64 + (sq ^ flip), 1, sign);
             }
         }
 
@@ -155,10 +159,15 @@ pub fn eval_impl<const TRACE: bool>(b: &Board, tr: &mut [i16]) -> (i32, i32, i32
         }
 
         // pawn structure
-        for f in 0..8 {
-            let n = popcnt(pawns[c] & (FILE_A << f));
-            if n > 1 {
-                feat!(I_DOUBLED, n - 1, sign);
+        // doubled: pawns beyond the first on each file = pawns - occupied files
+        {
+            let mut fill = pawns[c];
+            fill |= fill >> 8;
+            fill |= fill >> 16;
+            fill |= fill >> 32;
+            let doubled = popcnt(pawns[c]) - popcnt(fill & RANK_1);
+            if doubled != 0 {
+                feat!(I_DOUBLED, doubled, sign);
             }
         }
         for sq in bits(pawns[c]) {
