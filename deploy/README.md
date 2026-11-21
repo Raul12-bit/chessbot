@@ -55,6 +55,7 @@ source venv/Scripts/activate
 pip install -r requirements.txt
 mkdir -p engines
 cp ../../bins/best.exe engines/chessbot.exe
+cp ../../book/gm_book.bin engines/book.bin
 cp ../config.yml.example config.yml
 ```
 
@@ -79,7 +80,7 @@ python lichess-bot.py
 
 Бот принимает вызовы: стандартные шахматы, bullet/blitz/rapid (база до 30 мин, инкремент до 20 с),
 rated и casual, от людей и ботов, по одной партии одновременно. Движку передаются
-`Hash 256`, `Threads 1`, `Move Overhead 100`. Чтобы бот сам вызывал других ботов,
+`Hash 256`, `Threads 8`, `Move Overhead 100`. Чтобы бот сам вызывал других ботов,
 поставьте `matchmaking.allow_matchmaking: true` в `config.yml`.
 
 ## Проверка движка перед запуском
@@ -91,7 +92,12 @@ cd /c/dev/chessbot
 
 ## Примечания
 
-- Движок однопоточный (`Threads` > 1 игнорируется), без пондеринга.
+- Многопоточный поиск (Lazy SMP): `Threads 8` в `uci_options`. На ноутбуке с 6 ядрами / 12 потоками
+  это оставляет запас системе и lichess-bot. Если компьютер нужен для другой работы — уменьшите до 4.
+  Пондеринга нет.
+- Дебютная книга из ~59 тыс. партий гроссмейстеров (`book/gm_book.bin`, ходы Карлсена с весом ×3):
+  движок сам берёт `book.bin` из папки, где лежит `chessbot.exe`. Отключить — `OwnBook: false`
+  в `uci_options`; другой файл — `BookFile: <путь>`. Книга используется только в партиях с часами.
 - Если бот теряет время в bullet — увеличьте `Move Overhead` в `uci_options`
   (миллисекунды) и/или `move_overhead` lichess-bot.
 - Бинарник собран с `target-cpu=native`: на другом компьютере пересоберите его

@@ -46,8 +46,10 @@ const F_TT_EVAL: bool = true;
 const F_HIST_PRUNE: bool = false;
 /// Singular extensions (+ multi-cut) for the TT move.
 const F_SE: bool = false;
+/// Capture history in the ordering of captures (instead of plain MVV-LVA).
+const F_CAPHIST: bool = false;
 /// Correction history: static eval corrected by what searches found for this pawn structure.
-const F_CORR: bool = false;
+const F_CORR: bool = true;
 const CORR_SIZE: usize = 16384;
 const CORR_GRAIN: i32 = 256;
 const CORR_MAX: i32 = CORR_GRAIN * 32;
@@ -83,10 +85,14 @@ pub struct Limits {
     pub movestogo: Option<u64>,
     pub nodes: Option<u64>,
     pub infinite: bool,
+    /// `go ponder`: no time limits until `ponderhit` (clears `Searcher::pondering`).
+    pub ponder: bool,
 }
 
 pub struct SearchResult {
     pub best: Move,
+    /// expected reply (second PV move), NULL if unknown
+    pub ponder: Move,
     pub score: i32,
     pub depth: i32,
     pub nodes: u64,
@@ -95,6 +101,8 @@ pub struct SearchResult {
 pub struct Searcher {
     pub tt: Arc<TT>,
     pub stop: Arc<AtomicBool>,
+    /// true while pondering: time limits are ignored until the GUI sends `ponderhit`.
+    pub pondering: Arc<AtomicBool>,
     /// Lazy SMP helper searchers (empty when Threads = 1).
     helpers: Vec<Searcher>,
     /// Node count published every 1024 nodes (read by the main thread for `info`).
@@ -123,6 +131,7 @@ pub struct Searcher {
     cont: Box<ContHist>,
     lmr: Box<[[i32; 64]; 64]>,
     corr: Box<[[i32; CORR_SIZE]; 2]>,
+    cap_hist: Box<[[[i32; 6]; 64]; 12]>,
     root_depth: i32,
 }
 
@@ -244,6 +253,7 @@ impl Searcher {
         Searcher {
             tt,
             stop,
+            pondering: Arc::new(AtomicBool::new(false)),
             helpers: Vec::new(),
             node_counter: Arc::new(AtomicU64::new(0)),
             is_helper: false,
@@ -267,6 +277,7 @@ impl Searcher {
             cont: new_cont_hist(),
             lmr: Box::new(lmr_table()),
             root_depth: 0,
+            cap_hist: Box::new([[[0; 6]; 64]; 12]),
             corr: vec![[0i32; CORR_SIZE]; 2].into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()),
         }
     }
@@ -284,6 +295,7 @@ impl Searcher {
         self.killers = [[Move::NULL; 2]; MAX_PLY + 2];
         *self.counter = [[Move::NULL; 64]; 12];
         self.cont = new_cont_hist();
+        *self.cap_hist = [[[0; 6]; 64]; 12];
         for side in self.corr.iter_mut() {
             side.iter_mut().for_each(|v| *v = 0);
         }
@@ -366,7 +378,9 @@ impl Searcher {
             if self.is_helper {
                 self.node_counter.store(self.nodes, Ordering::Relaxed);
             }
-            if self.stop.load(Ordering::Relaxed) || self.elapsed_ms() >= self.hard_ms || self.nodes >= self.node_limit
+            if self.stop.load(Ordering::Relaxed)
+                || (self.elapsed_ms() >= self.hard_ms && !self.pondering.load(Ordering::Relaxed))
+                || self.nodes >= self.node_limit
             {
                 self.stopped = true;
             }
@@ -448,6 +462,11 @@ impl Searcher {
                 }
             }
         }
+        if F_CAPHIST {
+            for h in self.cap_hist.iter_mut().flatten().flatten() {
+                *h /= 2;
+            }
+        }
 
         let max_depth = limits.depth.unwrap_or(MAX_PLY as i32 - 1).clamp(1, MAX_PLY as i32 - 1);
 
@@ -455,6 +474,7 @@ impl Searcher {
         let mut list = MoveList::new();
         generate(root, &mut list, GEN_ALL);
         let mut best = if list.len > 0 { list.moves[0] } else { Move::NULL };
+        let mut ponder_mv = Move::NULL;
         let mut best_score = 0;
         let mut completed_depth = 0;
         let mut prev_score = 0;
@@ -493,6 +513,7 @@ impl Searcher {
             // a root move fully searched before the stop is still trustworthy
             if self.pv_len[0] > 0 && !self.pv[0][0].is_null() {
                 best = self.pv[0][0];
+                ponder_mv = if self.pv_len[0] >= 2 { self.pv[0][1] } else { Move::NULL };
             }
             if self.stopped {
                 break;
@@ -516,9 +537,11 @@ impl Searcher {
                     pv.join(" ")
                 );
             }
+            // while pondering the clock is not ours: never stop on time
+            let pondering = self.pondering.load(Ordering::Relaxed);
             if limits.movetime.is_none() && self.soft_ms != u64::MAX {
                 // Only one legal move: nothing to think about.
-                if list.len == 1 {
+                if list.len == 1 && !pondering {
                     break;
                 }
                 // Best-move stability: think less when the best move keeps
@@ -533,7 +556,7 @@ impl Searcher {
                 let stab_pct = TM_STABILITY_PCT[stable_iters.min(TM_STABILITY_PCT.len() - 1)];
                 let drop_pct = if depth > 1 && score < iter_score - 30 { 130 } else { 100 };
                 let cutoff = self.soft_ms * TM_SOFT_PCT / 100 * stab_pct / 100 * drop_pct / 100;
-                if self.elapsed_ms() >= cutoff {
+                if self.elapsed_ms() >= cutoff && !pondering {
                     break;
                 }
             }
@@ -546,13 +569,14 @@ impl Searcher {
             }
         }
 
-        if limits.infinite && !self.is_helper {
-            while !self.stop.load(Ordering::Relaxed) {
+        // `go infinite` / `go ponder`: never answer before `stop` / `ponderhit`
+        if (limits.infinite || limits.ponder) && !self.is_helper {
+            while !self.stop.load(Ordering::Relaxed) && (limits.infinite || self.pondering.load(Ordering::Relaxed)) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
 
-        SearchResult { best, score: best_score, depth: completed_depth, nodes: self.nodes }
+        SearchResult { best, ponder: ponder_mv, score: best_score, depth: completed_depth, nodes: self.nodes }
     }
 
 
@@ -595,7 +619,13 @@ impl Searcher {
                     b.piece_on(m.to()).unwrap_or(PAWN)
                 };
                 let attacker = b.piece_on(m.from()).unwrap_or(PAWN);
-                let mvv_lva = if m.is_capture() { MVV[victim] * 16 - MVV[attacker] } else { 0 };
+                let mvv_lva = if !m.is_capture() {
+                    0
+                } else if F_CAPHIST {
+                    MVV[victim] * 10_000 + self.cap_hist[b.mailbox[m.from()] as usize][m.to()][victim]
+                } else {
+                    MVV[victim] * 16 - MVV[attacker]
+                };
                 let promo = if m.is_promo() && m.promo_piece() == QUEEN { 200 } else { 0 };
                 if see_ge(b, m, 0) {
                     2_000_000 + mvv_lva + promo
@@ -629,6 +659,13 @@ impl Searcher {
         list.moves.swap(i, best);
         scores.swap(i, best);
         list.moves[i]
+    }
+
+    /// Capture history: [moved piece code][to][captured piece type].
+    fn update_cap_hist(&mut self, b: &Board, m: Move, bonus: i32) {
+        let victim = if m.flags() == EP_CAPTURE { PAWN } else { b.piece_on(m.to()).unwrap_or(PAWN) };
+        let h = &mut self.cap_hist[b.mailbox[m.from()] as usize][m.to()][victim];
+        *h += bonus - *h * bonus.abs() / 16384;
     }
 
     fn update_history(&mut self, side: usize, m: Move, bonus: i32) {
@@ -798,6 +835,7 @@ impl Searcher {
         let mut best_score = -INF;
         let mut best_move = Move::NULL;
         let mut quiets_tried = MoveList::new();
+        let mut captures_tried = MoveList::new();
         let mut moves_searched: i32 = 0;
 
         self.hashes.push(b.hash);
@@ -888,6 +926,15 @@ impl Searcher {
                     }
                     self.pv_len[ply] = child_len + 1;
                     if score >= beta {
+                        if F_CAPHIST && USE_ORDERING {
+                            let bonus = (depth * depth).min(1200);
+                            if m.is_capture() {
+                                self.update_cap_hist(b, m, bonus);
+                            }
+                            for &c in captures_tried.as_slice() {
+                                self.update_cap_hist(b, c, -bonus);
+                            }
+                        }
                         if is_quiet && USE_ORDERING {
                             if self.killers[ply][0] != m {
                                 self.killers[ply][1] = self.killers[ply][0];
@@ -917,6 +964,8 @@ impl Searcher {
             }
             if is_quiet {
                 quiets_tried.push(m);
+            } else if m.is_capture() {
+                captures_tried.push(m);
             }
         }
         self.hashes.pop();

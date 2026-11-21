@@ -18,6 +18,8 @@ struct Uci {
     searcher: Option<Searcher>,
     handle: Option<JoinHandle<Searcher>>,
     stop: Arc<AtomicBool>,
+    /// set by `go ponder`, cleared by `ponderhit` / `stop`
+    pondering: Arc<AtomicBool>,
     hash_mb: usize,
     /// Opening book (GM games); used only for timed `go` commands.
     book: Option<Book>,
@@ -41,6 +43,7 @@ impl Uci {
             searcher: Some(Searcher::new(16, stop.clone())),
             handle: None,
             stop,
+            pondering: Arc::new(AtomicBool::new(false)),
             hash_mb: 16,
             book: default_book_path().and_then(|p| Book::load(&p).ok()),
             own_book: true,
@@ -147,6 +150,7 @@ impl Uci {
                 "depth" => limits.depth = num(i).map(|v| v as i32),
                 "nodes" => limits.nodes = num(i),
                 "infinite" => limits.infinite = true,
+                "ponder" => limits.ponder = true,
                 _ => {}
             }
             i += 1;
@@ -154,7 +158,13 @@ impl Uci {
         self.join();
         // Book move: only in timed games, never for analysis / fixed depth / nodes.
         let timed = limits.wtime.is_some() || limits.btime.is_some() || limits.movetime.is_some();
-        if self.own_book && timed && !limits.infinite && limits.depth.is_none() && limits.nodes.is_none() {
+        if self.own_book
+            && timed
+            && !limits.infinite
+            && !limits.ponder
+            && limits.depth.is_none()
+            && limits.nodes.is_none()
+        {
             let r = self.next_rand();
             if let Some(m) = self.book.as_ref().and_then(|bk| bk.pick(&self.board, r)) {
                 println!("info string book move");
@@ -167,13 +177,24 @@ impl Uci {
             None => Searcher::new(self.hash_mb, self.stop.clone()),
         };
         self.stop.store(false, Ordering::SeqCst);
+        searcher.pondering = self.pondering.clone();
+        self.pondering.store(limits.ponder, Ordering::SeqCst);
         let board = self.board;
         let history = self.history.clone();
         let handle = std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let res = searcher.search(&board, &history, &limits);
-                println!("bestmove {}", res.best.to_uci());
+                // expected reply for pondering, only if it is legal after our move
+                let ponder = if res.best.is_null() || res.ponder.is_null() {
+                    None
+                } else {
+                    board.make_move(res.best).parse_uci_move(&res.ponder.to_uci())
+                };
+                match ponder {
+                    Some(p) => println!("bestmove {} ponder {}", res.best.to_uci(), p.to_uci()),
+                    None => println!("bestmove {}", res.best.to_uci()),
+                }
                 let _ = io::stdout().flush();
                 searcher
             });
@@ -248,6 +269,7 @@ pub fn run() {
                 println!("option name Hash type spin default 16 min 1 max 65536");
                 println!("option name Threads type spin default 1 min 1 max 64");
                 println!("option name Move Overhead type spin default 30 min 0 max 5000");
+                println!("option name Ponder type check default false");
                 println!("option name OwnBook type check default true");
                 println!("option name BookFile type string default <empty>");
                 println!("uciok");
@@ -261,7 +283,9 @@ pub fn run() {
                 uci.position(&tokens[1..]);
             }
             "go" => uci.go(&tokens[1..]),
+            "ponderhit" => uci.pondering.store(false, Ordering::SeqCst),
             "stop" => {
+                uci.pondering.store(false, Ordering::SeqCst);
                 uci.stop.store(true, Ordering::SeqCst);
                 uci.join();
             }

@@ -5,7 +5,7 @@ token: "set-LICHESS_BOT_TOKEN-env-var"
 url: "https://lichess.org/"
 
 engine:
-  dir: "./engines/"                # copy bins/best.exe here as chessbot.exe
+  dir: "./engines/"                # copy bins/best.exe here as chessbot.exe and book/gm_book.bin as book.bin
   name: "chessbot.exe"
   debug: false
   working_dir: ""
@@ -48,7 +48,7 @@ engine:
 
   uci_options:                     # only options the engine actually supports
     Hash: 256
-    Threads: 1
+    Threads: 8                     # Lazy SMP; lower it if the computer is needed for other work
     Move Overhead: 100
 
   silence_stderr: false
