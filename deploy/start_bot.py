@@ -1,7 +1,7 @@
 """Start lichess-bot with a chosen kind of games to look for (bullet / blitz / rapid / mixed).
 
 Run with the lichess-bot venv (start_bot.bat does this):
-    lichess-bot\\venv\\Scripts\\python.exe start_bot.py [bullet|blitz|rapid|fast|mixed|none]
+    lichess-bot\\venv\\Scripts\\python.exe start_bot.py [bullet|blitz|rapid|fast|mixed|none] [equal|weaker|stronger]
 
 Reads lichess-bot/config.yml, writes lichess-bot/config_run.yml with the matchmaking section
 set for the chosen mode and starts `lichess-bot.py --config config_run.yml`.
@@ -65,6 +65,34 @@ def choose_mode(argv):
         print("Введите число от 1 до 6.")
 
 
+OPPONENTS = {
+    # description, opponent_rating_difference, rating_preference
+    "equal": ("равные (±300 от рейтинга бота)", 300, "none"),
+    "weaker": ("слабее (в пределах 400, предпочитать более слабых) — больше побед", 400, "low"),
+    "stronger": ("сильнее (в пределах 400, предпочитать более сильных) — больше поражений, быстрее рост", 400, "high"),
+}
+
+
+def choose_opponents(argv):
+    if len(argv) > 2 and argv[2].lower() in OPPONENTS:
+        return argv[2].lower()
+    if len(argv) > 1:
+        return "equal"  # mode given on the command line: no second question
+    print()
+    print("Каких соперников искать?")
+    keys = list(OPPONENTS)
+    for i, k in enumerate(keys, 1):
+        print(f"  {i} — {OPPONENTS[k][0]}")
+    while True:
+        try:
+            answer = input("Выбор [1-3, Enter = 1]: ").strip() or "1"
+        except EOFError:
+            answer = "1"
+        if answer in ("1", "2", "3"):
+            return keys[int(answer) - 1]
+        print("Введите 1, 2 или 3.")
+
+
 def user_env_token():
     """LICHESS_BOT_TOKEN from the Windows user environment (set with SetEnvironmentVariable ... "User"),
     which processes started before it was set do not inherit."""
@@ -78,7 +106,7 @@ def user_env_token():
         return ""
 
 
-def matchmaking_section(base, mode):
+def matchmaking_section(base, mode, opponents="equal"):
     mm = dict(base or {})
     if mode == "none":
         mm["allow_matchmaking"] = False
@@ -88,6 +116,9 @@ def matchmaking_section(base, mode):
     mm["allow_during_games"] = False
     mm["challenge_timeout"] = 1  # minutes after a game; lichess-bot does not allow less
     mm["challenge_filter"] = "coarse"
+    _, diff, pref = OPPONENTS.get(opponents, OPPONENTS["equal"])
+    mm["opponent_rating_difference"] = diff
+    mm["rating_preference"] = pref
     mm.setdefault("challenge_variant", "standard")
     # default spec = first time control, overrides = the others: lichess-bot picks one at random
     mm["challenge_initial_time"] = [tcs[0][0]]
@@ -109,7 +140,8 @@ def main():
         config = yaml.safe_load(f)
 
     mode = choose_mode(sys.argv)
-    config["matchmaking"] = matchmaking_section(config.get("matchmaking"), mode)
+    opponents = "equal" if mode == "none" else choose_opponents(sys.argv)
+    config["matchmaking"] = matchmaking_section(config.get("matchmaking"), mode, opponents)
     # one game at a time: when a game is found the bot stops looking until it ends
     config.setdefault("challenge", {})["concurrency"] = 1
 
@@ -138,8 +170,9 @@ def main():
         print("\nРежим: без поиска, бот только принимает вызовы.")
     else:
         name, tcs = MODES[mode]
-        print(f"\nРежим: {name} ({describe(tcs)}). Новый вызов — через 1 минуту после партии,")
-        print("дальше не чаще раза в минуту, пока кто-то не примет. Остановка: Ctrl+C.")
+        print(f"\nРежим: {name} ({describe(tcs)}). Соперники: {OPPONENTS[opponents][0]}.")
+        print("Новый вызов — через 1 минуту после партии, дальше не чаще раза в минуту,")
+        print("пока кто-то не примет. Остановка: Ctrl+C.")
     print()
     proc = subprocess.Popen([sys.executable, "lichess-bot.py", "--config", "config_run.yml"], cwd=root, env=env)
     try:
