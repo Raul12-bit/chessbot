@@ -58,6 +58,12 @@ const F_CAPHIST: bool = true;
 const F_CORR: bool = true;
 /// NNUE evaluation instead of the hand-crafted one.
 const F_NNUE: bool = true;
+/// Material-based drawishness: no winning pawns and at most a minor piece up, or opposite-coloured
+/// bishops, scale the eval down (live games AMstwtjj, jeFigEaS: "won" endings that were draws).
+/// Off: +9 alone (ELO_LOG #41), but together with check extensions only +2 (#43), not confirmed.
+/// Also tried after the live games and rejected (#38, #39, #42): eval decay with the
+/// 50-move counter, NNUE output x0.75, draw score +-1 instead of 0.
+const F_EG_SCALE: bool = false;
 const CORR_SIZE: usize = 16384;
 const CORR_GRAIN: i32 = 256;
 const CORR_MAX: i32 = CORR_GRAIN * 32;
@@ -67,6 +73,41 @@ fn pawn_index(b: &Board) -> usize {
     let w = b.pieces[PAWN] & b.colors[WHITE];
     let bl = b.pieces[PAWN] & b.colors[BLACK];
     ((w.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ bl.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)) >> 50) as usize
+}
+
+const LIGHT_SQUARES: Bitboard = 0x55AA_55AA_55AA_55AA;
+const FILES_A_TO_D: Bitboard = 0x0F0F_0F0F_0F0F_0F0F;
+
+/// Drawishness of the material for the side that `v` (side-to-move view) favours, in 64ths
+/// (64 = no change). Queen positions are left alone.
+fn eg_scale(b: &Board, v: i32) -> i32 {
+    if b.pieces[QUEEN] != 0 {
+        return 64;
+    }
+    let strong = if v >= 0 { b.side } else { b.side ^ 1 };
+    let weak = strong ^ 1;
+    let npm = |c: usize| {
+        300 * popcnt(b.pieces_of(c, KNIGHT) | b.pieces_of(c, BISHOP)) as i32 + 500 * popcnt(b.pieces_of(c, ROOK)) as i32
+    };
+    let (ns, nw) = (npm(strong), npm(weak));
+    let sp = popcnt(b.pieces_of(strong, PAWN)) as i32;
+    let wp = popcnt(b.pieces_of(weak, PAWN)) as i32;
+    // no pawns and at most a minor piece up: a lone minor cannot mate, R vs minor etc. are mostly drawn
+    if sp == 0 && ns - nw <= 300 {
+        return if ns <= 300 { 4 } else { 16 };
+    }
+    // only one bishop each, on opposite colours
+    if ns == 300 && nw == 300 && b.pieces[KNIGHT] == 0 && popcnt(b.pieces[BISHOP] & LIGHT_SQUARES) == 1 {
+        return 32;
+    }
+    // equal pieces, one extra pawn, all pawns on one wing
+    if ns == nw && ns > 0 && sp - wp == 1 {
+        let pawns = b.pieces[PAWN];
+        if pawns & FILES_A_TO_D == 0 || pawns & !FILES_A_TO_D == 0 {
+            return 44;
+        }
+    }
+    64
 }
 
 #[derive(Clone, Copy, Default)]
@@ -315,11 +356,11 @@ impl Searcher {
     /// Static evaluation of `b`, the position at `ply` (NNUE uses the accumulator of that ply).
     #[inline(always)]
     fn raw_eval(&self, b: &Board, ply: usize) -> i32 {
-        if F_NNUE {
-            self.acc[ply].evaluate(b.side, popcnt(b.occ()) as usize).clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
-        } else {
-            evaluate(b)
+        let mut v = if F_NNUE { self.acc[ply].evaluate(b.side, popcnt(b.occ()) as usize) } else { evaluate(b) };
+        if F_EG_SCALE {
+            v = v * eg_scale(b, v) / 64;
         }
+        v.clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
     }
 
     /// Accumulator of the child position at `ply + 1` from the one at `ply`.
@@ -1165,5 +1206,33 @@ impl Searcher {
             self.tt.store(b.hash, best_move, score_to_tt(best_score, ply), stand_pat, 0, bound);
         }
         best_score
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scale(fen: &str) -> i32 {
+        let b = Board::from_fen(fen).expect("fen");
+        eg_scale(&b, 100)
+    }
+
+    #[test]
+    fn eg_scale_cases() {
+        // side to move (white) "better" with a lone knight vs pawns: cannot win
+        assert_eq!(scale("8/8/4k3/6pp/8/3NK3/8/8 w - - 0 1"), 4);
+        // rook vs bishop, no pawns
+        assert_eq!(scale("8/8/4k3/8/8/2R1K3/8/5b2 w - - 0 1"), 16);
+        // opposite-coloured bishops (c1 dark, c8 light) with pawns
+        assert_eq!(scale("2b5/5pk1/8/8/8/5PP1/6K1/2B5 w - - 0 1"), 32);
+        // same-coloured bishops: no scaling
+        assert_eq!(scale("1b6/p4pk1/8/8/8/P4PP1/6K1/2B5 w - - 0 1"), 64);
+        // N+4P vs B+3P, all pawns on the king side (live game jeFigEaS)
+        assert_eq!(scale("8/4k1p1/5p1p/1b6/3KP2P/4NPP1/8/8 w - - 1 51"), 44);
+        // queens on the board: untouched
+        assert_eq!(scale("8/8/4k3/8/8/2Q1K3/8/5b2 w - - 0 1"), 64);
+        // rook vs pawns: no scaling (rook is a full piece up)
+        assert_eq!(scale("8/8/4k3/6pp/8/2R1K3/8/8 w - - 0 1"), 64);
     }
 }
