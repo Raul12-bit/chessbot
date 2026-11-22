@@ -56,9 +56,9 @@ def choose_mode(argv):
             print(f"  {key} — {name} ({describe(tcs)})")
     while True:
         try:
-            answer = input("Выбор [1-6]: ").strip()
+            answer = input("Выбор [1-6, Enter = 4]: ").strip() or "4"
         except EOFError:
-            answer = "5"
+            answer = "4"
         for key, mode in MENU:
             if answer == key or answer.lower() == mode:
                 return mode
@@ -167,14 +167,17 @@ def main():
         env["LICHESS_BOT_TOKEN"] = token
 
     if mode == "none":
-        print("\nРежим: без поиска, бот только принимает вызовы.")
+        print("\nРежим: БЕЗ ПОИСКА — бот сам никого не вызывает, только ждёт вызовов.")
+        print("Чтобы бот искал партии сам, перезапустите и выберите 1–5.")
     else:
         name, tcs = MODES[mode]
         print(f"\nРежим: {name} ({describe(tcs)}). Соперники: {OPPONENTS[opponents][0]}.")
-        print("Новый вызов — через 1 минуту после партии, дальше не чаще раза в минуту,")
-        print("пока кто-то не примет. Остановка: Ctrl+C.")
+        print("Бот вызывает ботов по одному: первый вызов через ~15 с, следующий через ~20 с после отказа.")
+        print("Многие боты отказываются или заняты (строки 'declined' в логе) — это нормально;")
+        print("обычно партия находится за 1–3 минуты. Остановка: Ctrl+C.")
     print()
-    proc = subprocess.Popen([sys.executable, "lichess-bot.py", "--config", "config_run.yml"], cwd=root, env=env)
+    runner = Path(__file__).resolve().parent / "run_lichess_bot.py"
+    proc = subprocess.Popen([sys.executable, str(runner), "--config", "config_run.yml"], cwd=root, env=env)
     try:
         return proc.wait()
     except KeyboardInterrupt:
