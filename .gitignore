@@ -12,3 +12,10 @@ DONE
 /logs/
 config.json
 /nets/train/
+
+# local notes and agent files
+CLAUDE.md
+PROGRESS.md
+REPORT.md
+*_PROMPT.txt
+.claude/
